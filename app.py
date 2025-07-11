@@ -1,41 +1,34 @@
-
-from flask import Flask, redirect, request, render_template, session
+from flask import Flask, request, redirect, render_template_string
 import os
-import requests
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "your-secret-key")
 
-API_KEY = os.environ.get("KITE_API_KEY", "")
-API_SECRET = os.environ.get("KITE_API_SECRET", "")
+kite_api_key = os.getenv("KITE_API_KEY")
+kite_api_secret = os.getenv("KITE_SECRET")
 
 @app.route("/")
 def home():
-    if "access_token" in session:
-        return render_template("token.html", token=session["access_token"])
-    return render_template("home.html", api_key=API_KEY)
+    kite_login_url = f"https://kite.trade/connect/login?api_key={kite_api_key}" if kite_api_key else "#"
+    return render_template_string("""
+        <h2>Welcome to Price Theorem Token Manager</h2>
+        {% if kite_api_key %}
+            <p><a href='{{ kite_login_url }}' target='_blank'>🔗 Connect to Kite & Generate Token</a></p>
+        {% else %}
+            <p style='color:red;'>⚠️ Kite API Key not set in environment.</p>
+        {% endif %}
+    """, kite_login_url=kite_login_url, kite_api_key=kite_api_key)
 
-@app.route("/kite-login")
-def kite_login():
-    if not API_KEY:
-        return "API Key not configured.", 500
-    return redirect(f"https://kite.zerodha.com/connect/login?v=3&api_key={API_KEY}")
-
-@app.route("/callback")
-def callback():
-    request_token = request.args.get("request_token")
-    if not request_token:
-        return "Request token not found", 400
-    data = {
-        "api_key": API_KEY,
-        "request_token": request_token,
-        "secret": API_SECRET
-    }
-    response = requests.post("https://api.kite.trade/session/token", data=data)
-    if response.status_code == 200:
-        session["access_token"] = response.json()["data"]["access_token"]
-        return redirect("/")
-    return "Failed to retrieve access token", 500
-
-if __name__ == "__main__":
-    app.run(debug=True)
+@app.route("/token", methods=["GET", "POST"])
+def save_token():
+    if request.method == "POST":
+        token = request.form.get("token")
+        with open("access_token.txt", "w") as f:
+            f.write(token)
+        return "✅ Access token saved!"
+    return render_template_string("""
+        <form method="post">
+            <label>Enter Kite Access Token:</label><br>
+            <input name="token" required>
+            <button type="submit">Save</button>
+        </form>
+    """)
