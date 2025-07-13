@@ -1,0 +1,24 @@
+
+<!DOCTYPE html>
+<html>
+<head><title>Option Volume Dashboard</title></head>
+<body>
+    <h2>Option Volume Dashboard</h2>
+    <table border="1">
+        <tr><th>Stock</th><th>Price</th><th>Change %</th><th>Volume Rating</th></tr>
+        {% for row in data %}
+        <tr>
+            <td>{{ row.symbol }}</td>
+            <td>{{ row.price }}</td>
+            <td>{{ row.change_pct }}%</td>
+            <td>
+                {% for filled in row.stars %}
+                    <span style="color:{{ 'gold' if filled else 'gray' }}">★</span>
+                {% endfor %}
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+    <a href="/">Back</a>
+</body>
+</html>
