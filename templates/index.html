@@ -1,44 +1,63 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Price Theorem Alerts</title>
-    <meta http-equiv="refresh" content="15">
-    <link rel="stylesheet" href="/static/style.css">
+    <meta charset="UTF-8">
+    <title>Price Theorem – Option Volume Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
 <body>
-    <h1>📈 Price Theorem – iGOT Option Volume Results</h1>
-
-    <div style="margin-bottom: 20px;">
-        <a href="https://kite.trade/connect/login?api_key={{ kite_api_key }}" class="login-btn">🔐 Login to Kite</a>
-        <p><small>Login every morning to generate the daily access token</small></p>
-        <form method="get" action="/">
-            <button type="submit">🔄 Refresh</button>
-        </form>
+    <div class="container">
+        <h1>📊 Price Theorem Dashboard</h1>
+        <div class="sub-header">
+            <p>Logged in as <strong>{{ session.get('username') }}</strong></p>
+            <form action="/logout" method="post">
+                <button class="logout-btn">Logout</button>
+            </form>
+        </div>
+        <div class="refresh-section">
+            <form method="get" action="/">
+                <button class="refresh-btn">🔄 Refresh</button>
+            </form>
+            <p class="note">Page auto-refreshes every 60 sec</p>
+        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Symbol</th>
+                    <th>LTP</th>
+                    <th>Move</th>
+                    <th>Strike</th>
+                    <th>Type</th>
+                    <th>Color</th>
+                    <th>Volume</th>
+                    <th>Result</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for alert in alerts %}
+                    {% for option in alert.options %}
+                        <tr class="{{ 'green-row' if option.result == '✅' else 'red-row' }}">
+                            <td>{{ alert.time }}</td>
+                            <td>{{ alert.symbol }}</td>
+                            <td>{{ alert.ltp }}</td>
+                            <td>{{ alert.move }}</td>
+                            <td>{{ option.strike }}</td>
+                            <td>{{ option.type }}</td>
+                            <td>{{ option.color }}</td>
+                            <td>{{ option.volume }}</td>
+                            <td class="result">{{ option.result }}</td>
+                        </tr>
+                    {% endfor %}
+                {% endfor %}
+            </tbody>
+        </table>
     </div>
 
-    <table>
-        <thead>
-            <tr>
-                <th>Stock</th>
-                <th>Time</th>
-                <th>Price</th>
-                <th>% Move</th>
-                <th>PUT Result</th>
-                <th>CALL Result</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for alert in alerts %}
-            <tr>
-                <td>{{ alert.symbol }}</td>
-                <td>{{ alert.time }}</td>
-                <td>{{ alert.ltp }}</td>
-                <td>{{ alert.pct_move }}</td>
-                <td>{{ alert.put_result }}</td>
-                <td>{{ alert.call_result }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+    <script>
+        setTimeout(() => location.reload(), 60000); // auto-refresh every 60 sec
+    </script>
 </body>
 </html>
+
