@@ -1,5 +1,4 @@
 from flask import Flask, render_template
-import os
 
 app = Flask(__name__)
 
@@ -7,5 +6,13 @@ app = Flask(__name__)
 def home():
     return render_template('index.html')
 
+@app.route('/token')
+def token():
+    return render_template('token.html')
+
+@app.route('/update-token')
+def update_token():
+    return render_template('update_token.html')
+
 if __name__ == '__main__':
-    app.run()
+    app.run(debug=True)
