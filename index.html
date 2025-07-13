@@ -1,0 +1,28 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Price Theorem Alerts</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <h1>📈 Price Theorem – iGOT Option Volume Results</h1>
+
+    <div style="margin-bottom: 20px;">
+        <a href="https://kite.trade/connect/login?api_key={{ kite_api_key }}" class="login-btn">🔐 Login to Kite</a>
+        <p><small>Login every morning to generate the daily access token</small></p>
+    </div>
+
+    <table>
+        <tr><th>Stock</th><th>Time</th><th>PUT Result</th><th>CALL Result</th></tr>
+        {% for alert in alerts %}
+        <tr>
+            <td>{{ alert.symbol }}</td>
+            <td>{{ alert.time }}</td>
+            <td>{{ alert.put_result }}</td>
+            <td>{{ alert.call_result }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+</body>
+</html>
