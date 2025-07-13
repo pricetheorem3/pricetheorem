@@ -1,0 +1,27 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Price Theorem</title>
+    <style>
+        body { font-family: Arial; margin: 20px; background-color: #f4f4f4; }
+        .header { font-size: 24px; font-weight: bold; }
+        .symbol-box { background: white; padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .star { font-size: 20px; color: gold; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="header">Price Theorem: Option Volume Dashboard</div>
+    <p>Kite API Key found: {{ kite_api_key }}</p>
+    <div class="symbol-box">
+        <div><b>RELIANCE</b> @ ₹2815.5 (↑ 1.2%)</div>
+        <div>
+            <span class="star" title="Strike 2800">&#9733;</span>
+            <span class="star" title="Strike 2820">&#9733;</span>
+            <span class="star" title="Strike 2840">&#9733;</span>
+            <span class="star" title="Strike 2860">&#9733;</span>
+            <span class="star" title="Strike 2880">&#9733;</span>
+        </div>
+    </div>
+</body>
+</html>
