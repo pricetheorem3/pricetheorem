@@ -1,92 +1,64 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Price Theorem Alerts</title>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            padding: 20px;
-            background: #f5f7fa;
-        }
-        h1 {
-            text-align: center;
-        }
-        .refresh-btn {
-            margin-bottom: 15px;
-            display: flex;
-            justify-content: center;
-        }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 14px;
-            background: white;
-        }
-        th, td {
-            border: 1px solid #ddd;
-            padding: 8px;
-            text-align: center;
-        }
-        th {
-            background: #333;
-            color: white;
-        }
-        tr:nth-child(even) {
-            background: #f2f2f2;
-        }
-        .green { color: green; }
-        .red { color: red; }
-    </style>
-    <script>
-        setInterval(() => location.reload(), 60000); // Auto-refresh every 60 seconds
-        function manualRefresh() {
-            location.reload();
-        }
-    </script>
+    <meta charset="UTF-8">
+    <title>Price Theorem – Option Volume Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
 <body>
-    <h1>📊 Price Theorem – Option Volume Alerts</h1>
-
-    <div class="refresh-btn">
-        <button onclick="manualRefresh()">🔄 Refresh</button>
-    </div>
-
-    {% for alert in alerts %}
-        <h2>{{ alert.symbol }} @ {{ alert.ltp }} ({{ alert.move }}) – {{ alert.time }}</h2>
+    <div class="container">
+        <h1>📊 Price Theorem Dashboard</h1>
+        <div class="sub-header">
+            <p>Logged in as <strong>{{ session.get('username') }}</strong></p>
+            <form action="/logout" method="post">
+                <button class="logout-btn">Logout</button>
+            </form>
+        </div>
+        <div class="refresh-section">
+            <form method="get" action="/">
+                <button class="refresh-btn">🔄 Refresh</button>
+            </form>
+            <p class="note">Page auto-refreshes every 60 sec</p>
+        </div>
         <table>
             <thead>
                 <tr>
+                    <th>Time</th>
+                    <th>Symbol</th>
+                    <th>LTP</th>
+                    <th>Move</th>
                     <th>Strike</th>
-                    <th>PUT Color</th>
-                    <th>PUT Vol</th>
-                    <th>PUT ✅</th>
-                    <th>CALL Color</th>
-                    <th>CALL Vol</th>
-                    <th>CALL ✅</th>
+                    <th>Type</th>
+                    <th>Color</th>
+                    <th>Volume</th>
+                    <th>Result</th>
                 </tr>
             </thead>
             <tbody>
-                {% for i in range(5) %}
-                    <tr>
-                        <td>{{ alert.options[i].strike }}</td>
-                        <td class="{{ 'green' if alert.options[i].color == 'Green' else 'red' }}">
-                            {{ alert.options[i].color }}
-                        </td>
-                        <td>{{ alert.options[i].volume }}</td>
-                        <td>{{ alert.options[i].result }}</td>
-                        <td class="{{ 'green' if alert.options[i+5].color == 'Green' else 'red' }}">
-                            {{ alert.options[i+5].color }}
-                        </td>
-                        <td>{{ alert.options[i+5].volume }}</td>
-                        <td>{{ alert.options[i+5].result }}</td>
-                    </tr>
+                {% for alert in alerts %}
+                    {% for option in alert.options %}
+                        <tr class="{{ 'green-row' if option.result == '✅' else 'red-row' }}">
+                            <td>{{ alert.time }}</td>
+                            <td>{{ alert.symbol }}</td>
+                            <td>{{ alert.ltp }}</td>
+                            <td>{{ alert.move }}</td>
+                            <td>{{ option.strike }}</td>
+                            <td>{{ option.type }}</td>
+                            <td>{{ option.color }}</td>
+                            <td>{{ option.volume }}</td>
+                            <td class="result">{{ option.result }}</td>
+                        </tr>
+                    {% endfor %}
                 {% endfor %}
             </tbody>
         </table>
-        <br>
-    {% endfor %}
+    </div>
+
+    <script>
+        setTimeout(() => location.reload(), 60000); // auto-refresh every 60 sec
+    </script>
 </body>
 </html>
+
 
