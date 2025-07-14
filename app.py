@@ -1,6 +1,6 @@
-# app.py  –  option-chain screener, expiry read from live chain
-# ─────────────────────────────────────────────────────────────────────────────
-import os, json, datetime, calendar
+# app.py  –  option-chain screener (monthly), correct token for candles
+# ────────────────────────────────────────────────────────────────────────────
+import os, json, datetime
 from flask import Flask, request, render_template, redirect, url_for, session
 from kiteconnect import KiteConnect
 
@@ -12,8 +12,7 @@ except ImportError:
     import pytz
     IST = pytz.timezone("Asia/Kolkata")
 
-UTC   = datetime.timezone.utc
-WIDTH = 2                                   # ATM ±2 strikes
+UTC, WIDTH = datetime.timezone.utc, 2        # ATM ±2 strikes
 
 # ─── Flask app & env ─────────────────────────────────────────────────────────
 app = Flask(__name__)
@@ -41,12 +40,18 @@ def get_instruments():
         INSTR_DATE  = today
     return INSTRUMENTS
 
-# ─── Expiry helper (reads chain) ────────────────────────────────────────────
-def next_expiry_from_chain(symbol: str) -> datetime.date:
-    """Return the nearest future option expiry date for `symbol`."""
-    s      = symbol.upper()
-    today  = datetime.datetime.now(IST).date()
-    dates  = sorted({
+# ─── Token lookup helper ────────────────────────────────────────────────────
+def token_for_symbol(tsym: str):
+    for inst in get_instruments():
+        if inst["tradingsymbol"] == tsym:
+            return inst["instrument_token"]
+    return None
+
+# ─── Expiry helper (reads live chain) ───────────────────────────────────────
+def next_expiry(symbol: str) -> datetime.date:
+    s = symbol.upper()
+    today = datetime.datetime.now(IST).date()
+    dates = sorted({
         i["expiry"] for i in get_instruments()
         if i["instrument_type"] in {"PE", "CE"}
         and (i["name"] == s or i["tradingsymbol"].startswith(s))
@@ -54,10 +59,10 @@ def next_expiry_from_chain(symbol: str) -> datetime.date:
     for d in dates:
         if d >= today:
             return d
-    return dates[-1]    # fallback (shouldn’t happen)
+    return dates[-1]
 
 def expiry_date(symbol: str) -> str:
-    return next_expiry_from_chain(symbol).strftime("%Y-%m-%d")
+    return next_expiry(symbol).strftime("%Y-%m-%d")
 
 # ─── Option-chain utilities ────────────────────────────────────────────────
 def _matches(sym, exp):
@@ -69,20 +74,20 @@ def _matches(sym, exp):
         and (i["name"] == s or i["tradingsymbol"].startswith(s))
     ]
 
-def strikes_from_chain(sym, exp_str, spot, width=WIDTH):
+def strikes_from_chain(sym, exp_str, spot):
     exp = datetime.datetime.strptime(exp_str, "%Y-%m-%d").date()
     m   = _matches(sym, exp)
-    if not m:                     # edge-case: no contracts yet
+    if not m:
         return []
     strikes = sorted({i["strike"] for i in m})
     atm     = min(strikes, key=lambda s: abs(s - spot))
     i       = strikes.index(atm)
-    return strikes[max(0, i - width): i + width + 1]
+    return strikes[max(0, i-WIDTH): i+WIDTH+1]
 
 def option_symbol(sym, exp_str, strike, kind):
     exp = datetime.datetime.strptime(exp_str, "%Y-%m-%d").date()
     for i in get_instruments():
-        if (i["instrument_type"] == ("PE" if kind == "PUT" else "CE")
+        if (i["instrument_type"] == ("PE" if kind=="PUT" else "CE")
             and i["strike"] == strike
             and i["expiry"] == exp
             and (i["name"] == sym.upper()
@@ -90,18 +95,21 @@ def option_symbol(sym, exp_str, strike, kind):
             return i["tradingsymbol"]
     return None
 
-# ─── 5-minute candle rule ──────────────────────────────────────────────────
-def check_option(opt, is_put):
-    kite = get_kite()
+# ─── 5-minute candle rule (now uses token) ─────────────────────────────────
+def check_option(tsym, is_put):
+    token = token_for_symbol(tsym)
+    if token is None:
+        print("No instrument_token for", tsym)
+        return "❌"
+
+    kite  = get_kite()
+    end   = datetime.datetime.now(IST)
+    start = datetime.datetime.combine(end.date(), datetime.time(9,15,tzinfo=IST))
     try:
-        end   = datetime.datetime.now(IST)
-        start = datetime.datetime.combine(end.date(), datetime.time(9, 15, tzinfo=IST))
-        cds   = kite.historical_data(opt, start, end, "5minute")
-        if not cds:
-            return "❌"
+        cds = kite.historical_data(token, start, end, "5minute")
+        if not cds: return "❌"
         latest = cds[-1]
-        if latest["volume"] != max(c["volume"] for c in cds):
-            return "❌"
+        if latest["volume"] != max(c["volume"] for c in cds): return "❌"
         green = latest["close"] > latest["open"]
         red   = latest["close"]  < latest["open"]
         return "✅" if ((is_put and green) or (not is_put and red)) else "❌"
@@ -122,19 +130,19 @@ if os.path.exists(ALERTS_FILE):
 
 def save_alert(a):
     try:
-        all_a = []
+        hist = []
         if os.path.exists(ALERTS_FILE):
             with open(ALERTS_FILE) as f:
-                all_a = json.load(f)
-        all_a = [x for x in all_a if x["time"].startswith(today())]
-        all_a.append(a)
+                hist = json.load(f)
+        hist = [x for x in hist if x["time"].startswith(today())]
+        hist.append(a)
         with open(ALERTS_FILE, "w") as f:
-            json.dump(all_a, f, indent=2)
+            json.dump(hist, f, indent=2)
         alerts.append(a)
     except Exception as e:
         print("Save alert:", e)
 
-# ─── Routes (login logic unchanged) ───────────────────────────────────────
+# ─── Routes (login unchanged) ─────────────────────────────────────────────
 @app.route("/")
 def index():
     if not session.get("logged_in"):
@@ -144,8 +152,8 @@ def index():
 @app.route("/login", methods=["GET", "POST"])
 def login_page():
     if request.method == "POST":
-        if (request.form.get("username") == os.getenv("APP_USERNAME", "admin")
-            and request.form.get("password") == os.getenv("APP_PASSWORD", "price123")):
+        if (request.form.get("username") == os.getenv("APP_USERNAME", "admin") and
+            request.form.get("password") == os.getenv("APP_PASSWORD", "price123")):
             session["logged_in"] = True
             return redirect(url_for("index"))
         return render_template("login.html", error="Invalid credentials")
@@ -159,26 +167,23 @@ def logout():
 @app.route("/login/callback")
 def login_callback():
     rt = request.args.get("request_token")
-    if not rt:
-        return "No request_token", 400
+    if not rt: return "No request_token", 400
     try:
         kite = KiteConnect(api_key=KITE_API_KEY)
         data = kite.generate_session(rt, api_secret=KITE_API_SECRET)
-        with open(TOKEN_FILE, "w") as f:
-            f.write(data["access_token"])
+        with open(TOKEN_FILE,"w") as f: f.write(data["access_token"])
         print("Access token saved.")
         return redirect(url_for("index"))
     except Exception as e:
         print("login_callback error:", e)
         return "Token generation failed", 500
 
-# ─── Webhook core ──────────────────────────────────────────────────────────
+# ─── Webhook core ─────────────────────────────────────────────────────────
 @app.route("/webhook", methods=["POST"])
 def webhook():
     p = request.json or {}
     symbol = p.get("symbol")
-    if not symbol:
-        return "Missing symbol", 400
+    if not symbol: return "Missing symbol", 400
 
     # robust trigger-time parser
     trg = p.get("trigger_time")
@@ -188,8 +193,7 @@ def webhook():
         except (ValueError, TypeError):
             try:
                 iso_dt = datetime.datetime.fromisoformat(trg.rstrip("Z"))
-                if iso_dt.tzinfo is None:
-                    iso_dt = iso_dt.replace(tzinfo=UTC)
+                if iso_dt.tzinfo is None: iso_dt = iso_dt.replace(tzinfo=UTC)
                 trig_dt = iso_dt.astimezone(IST)
             except Exception:
                 trig_dt = datetime.datetime.now(IST)
@@ -198,17 +202,15 @@ def webhook():
 
     kite = get_kite()
     try:
-        spot = kite.ltp(f"NSE:{symbol.upper()}")[f"NSE:{symbol.upper()}"]["last_price"]
+        ltp = kite.ltp(f"NSE:{symbol.upper()}")[f"NSE:{symbol.upper()}"]["last_price"]
         expiry  = expiry_date(symbol)
-        strikes = strikes_from_chain(symbol, expiry, spot)
+        strikes = strikes_from_chain(symbol, expiry, ltp)
 
         if not strikes:
             save_alert({
-                "symbol"     : symbol.upper(),
-                "time"       : trig_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                "ltp"        : f"₹{spot:.2f}",
-                "put_result" : "No option chain",
-                "call_result": "No option chain",
+                "symbol": symbol.upper(), "time": trig_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "ltp": f"₹{ltp:.2f}", "put_result": "No option chain",
+                "call_result": "No option chain"
             })
             return "OK", 200
 
@@ -216,21 +218,19 @@ def webhook():
         for st in strikes:
             pe = option_symbol(symbol, expiry, st, "PUT")
             ce = option_symbol(symbol, expiry, st, "CALL")
-            put_tags.append (f"{st}{check_option(f'NFO:{pe}',  True) if pe else '❌'}")
-            call_tags.append(f"{st}{check_option(f'NFO:{ce}', False) if ce else '❌'}")
+            put_tags.append (f"{st}{check_option(pe,  True) if pe else '❌'}")
+            call_tags.append(f"{st}{check_option(ce, False) if ce else '❌'}")
 
         save_alert({
-            "symbol"     : symbol.upper(),
-            "time"       : trig_dt.strftime("%Y-%m-%d %H:%M:%S"),
-            "ltp"        : f"₹{spot:.2f}",
-            "put_result" : "  ".join(put_tags),
-            "call_result": "  ".join(call_tags),
+            "symbol": symbol.upper(), "time": trig_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "ltp": f"₹{ltp:.2f}", "put_result": "  ".join(put_tags),
+            "call_result": "  ".join(call_tags)
         })
         return "OK", 200
     except Exception as e:
         print("Webhook error:", e)
         return "Error", 500
 
-# ─── Local dev runner ──────────────────────────────────────────────────────
+# ─── Local dev runner ─────────────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(debug=True)
