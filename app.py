@@ -1,4 +1,4 @@
-# app.py  –  option-chain strikes, relaxed filter, fixed .date() bug
+# app.py  –  robust trigger-time parser + all prior fixes
 # ─────────────────────────────────────────────────────────────────────────────
 import os, json, datetime
 from flask import Flask, request, render_template, redirect, url_for, session
@@ -12,10 +12,10 @@ except ImportError:                        # older runtimes
     import pytz
     IST = pytz.timezone("Asia/Kolkata")
 
-UTC = datetime.timezone.utc
-WIDTH = 2                                  # ATM ± 2 strikes
+UTC   = datetime.timezone.utc
+WIDTH = 2                                   # ATM ±2 strikes
 
-# ─── Flask app ──────────────────────────────────────────────────────────────
+# ─── Flask app & env ─────────────────────────────────────────────────────────
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "changeme")
 
@@ -53,30 +53,28 @@ def expiry_date(sym):
         if offs < 0: offs += 7
         return (today + datetime.timedelta(days=offs)).strftime("%Y-%m-%d")
     exp = last_thu(today.year, today.month)
-    if today > exp:                         # if series expired, pick next
+    if today > exp:                           # series already expired
         nxt = (today + datetime.timedelta(days=32)).replace(day=1)
         exp = last_thu(nxt.year, nxt.month)
     return exp.strftime("%Y-%m-%d")
 
-# ─── Strike utilities ───────────────────────────────────────────────────────
+# ─── Option-chain utilities ────────────────────────────────────────────────
 def _matches(sym, exp):
     s = sym.upper()
     return [
         i for i in get_instruments()
         if i["instrument_type"] in {"PE","CE"}
-        and i["expiry"] == exp               # <-- fixed: no .date()
+        and i["expiry"] == exp
         and (i["name"] == s or i["tradingsymbol"].startswith(s))
     ]
 
 def strikes_from_chain(sym, exp_str, spot, width=WIDTH):
     exp = datetime.datetime.strptime(exp_str, "%Y-%m-%d").date()
     m   = _matches(sym, exp)
-
-    if not m:                               # fallback → next-month expiry
+    if not m:                                  # fallback → next month
         nxt = (exp + datetime.timedelta(days=32)).replace(day=1)
         exp = last_thu(nxt.year, nxt.month)
         m   = _matches(sym, exp)
-
     if not m: return []
     strikes = sorted({i["strike"] for i in m})
     atm     = min(strikes, key=lambda s: abs(s-spot))
@@ -88,13 +86,13 @@ def option_symbol(sym, exp_str, strike, kind):
     for i in get_instruments():
         if (i["instrument_type"] == ("PE" if kind=="PUT" else "CE")
             and i["strike"] == strike
-            and i["expiry"] == exp          # <-- fixed: no .date()
+            and i["expiry"] == exp
             and (i["name"] == sym.upper()
                  or i["tradingsymbol"].startswith(sym.upper()))):
             return i["tradingsymbol"]
     return None
 
-# ─── 5-min candle check ────────────────────────────────────────────────────
+# ─── 5-minute candle check ────────────────────────────────────────────────
 def check_option(opt, is_put):
     kite = get_kite()
     try:
@@ -111,7 +109,7 @@ def check_option(opt, is_put):
         print("check_option error:", e)
         return "❌"
 
-# ─── Alert persistence ─────────────────────────────────────────────────────
+# ─── Alert persistence ────────────────────────────────────────────────────
 def today(): return datetime.datetime.now(IST).strftime("%Y-%m-%d")
 
 alerts = []
@@ -177,9 +175,25 @@ def webhook():
     symbol  = p.get("symbol")
     if not symbol: return "Missing symbol", 400
 
+    # ── Robust trigger-time parser ───────────────────────────────────────
     trg = p.get("trigger_time")
-    trig_dt = (datetime.datetime.fromtimestamp(int(trg), UTC).astimezone(IST)
-               if trg else datetime.datetime.now(IST))
+    if trg:
+        try:
+            # digits → epoch seconds
+            trig_dt = datetime.datetime.fromtimestamp(int(trg), UTC).astimezone(IST)
+        except (ValueError, TypeError):
+            try:
+                # ISO 8601 e.g. "2025-07-14T08:50:02Z"
+                iso   = trg.rstrip("Z")            # strip trailing Z
+                iso_dt= datetime.datetime.fromisoformat(iso)
+                if iso_dt.tzinfo is None:
+                    iso_dt = iso_dt.replace(tzinfo=UTC)
+                trig_dt = iso_dt.astimezone(IST)
+            except Exception:
+                trig_dt = datetime.datetime.now(IST)
+    else:
+        trig_dt = datetime.datetime.now(IST)
+    # ────────────────────────────────────────────────────────────────────
 
     kite = get_kite()
     try:
