@@ -7,22 +7,21 @@ from kiteconnect import KiteConnect
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "changeme")
 
-# Credentials
 VALID_USERNAME = os.environ.get("APP_USERNAME", "admin")
 VALID_PASSWORD = os.environ.get("APP_PASSWORD", "price123")
 
 kite_api_key = os.environ.get("KITE_API_KEY")
 kite_api_secret = os.environ.get("KITE_API_SECRET")
-kite = KiteConnect(api_key=kite_api_key)
 access_token_path = "access_token.txt"
 alerts_file_path = "alerts.json"
 
-# Load access token if exists
-if os.path.exists(access_token_path):
-    with open(access_token_path, "r") as f:
-        kite.set_access_token(f.read().strip())
+def get_kite():
+    kite = KiteConnect(api_key=kite_api_key)
+    if os.path.exists(access_token_path):
+        with open(access_token_path, "r") as f:
+            kite.set_access_token(f.read().strip())
+    return kite
 
-# Load today's alerts
 alerts = []
 today_str = datetime.date.today().strftime("%Y-%m-%d")
 if os.path.exists(alerts_file_path):
@@ -74,6 +73,7 @@ def get_strike_range(spot, step):
     return [atm + step * i for i in range(-2, 3)]
 
 def find_option(symbol, expiry, strike, option_type):
+    kite = get_kite()
     instruments = kite.instruments("NFO")
     for inst in instruments:
         if (inst["tradingsymbol"].startswith(symbol.upper())
@@ -84,6 +84,7 @@ def find_option(symbol, expiry, strike, option_type):
     return None
 
 def check_option(symbol, is_put):
+    kite = get_kite()
     try:
         end = datetime.datetime.now()
         start = datetime.datetime.combine(end.date(), datetime.time(9, 15))
@@ -125,8 +126,31 @@ def logout():
     session.clear()
     return redirect(url_for("login_page"))
 
+@app.route("/login/callback")
+def login_callback():
+    request_token = request.args.get("request_token")
+    if not request_token:
+        return "Login failed: No request_token provided"
+
+    try:
+        kite = KiteConnect(api_key=kite_api_key)
+        data = kite.generate_session(request_token, api_secret=kite_api_secret)
+        access_token = data["access_token"]
+
+        with open(access_token_path, "w") as f:
+            f.write(access_token)
+
+        kite.set_access_token(access_token)
+        print("Access token generated and set successfully.")
+        return redirect(url_for("index"))
+
+    except Exception as e:
+        print(f"Login callback error: {e}")
+        return "Login failed during token generation"
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    kite = get_kite()
     data = request.json
     symbol = data.get("symbol")
     if not symbol:
@@ -166,30 +190,6 @@ def webhook():
     except Exception as e:
         print(f"Webhook error: {e}")
         return "Error", 500
-
-# ✅ NEW: Kite login callback route
-@app.route("/login/callback")
-def login_callback():
-    request_token = request.args.get("request_token")
-    if not request_token:
-        return "Login failed: No request_token provided"
-
-    try:
-        kite = KiteConnect(api_key=kite_api_key)
-        data = kite.generate_session(request_token, api_secret=kite_api_secret)
-        access_token = data["access_token"]
-
-        # Save access token to file
-        with open(access_token_path, "w") as f:
-            f.write(access_token)
-
-        kite.set_access_token(access_token)
-        print("Access token generated and set successfully.")
-        return redirect(url_for("index"))
-
-    except Exception as e:
-        print(f"Login callback error: {e}")
-        return "Login failed during token generation"
 
 if __name__ == "__main__":
     app.run(debug=True)
