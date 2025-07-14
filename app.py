@@ -1,199 +1,117 @@
-import os
-import json
-import datetime
-from flask import Flask, request, render_template, redirect, url_for, session
+from flask import Flask, request, render_template, redirect
 from kiteconnect import KiteConnect
+import requests
+import json
+import os
+from datetime import datetime
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "changeme")
-
-VALID_USERNAME = os.environ.get("APP_USERNAME", "admin")
-VALID_PASSWORD = os.environ.get("APP_PASSWORD", "price123")
 
 kite_api_key = os.environ.get("KITE_API_KEY")
 kite_api_secret = os.environ.get("KITE_API_SECRET")
-access_token_path = "access_token.txt"
-alerts_file_path = "alerts.json"
+kite = KiteConnect(api_key=kite_api_key)
 
-def get_kite():
-    kite = KiteConnect(api_key=kite_api_key)
-    if os.path.exists(access_token_path):
-        with open(access_token_path, "r") as f:
-            kite.set_access_token(f.read().strip())
-    return kite
+access_token_path = "access_token.txt"
 
 alerts = []
-today_str = datetime.date.today().strftime("%Y-%m-%d")
-if os.path.exists(alerts_file_path):
-    try:
-        with open(alerts_file_path, "r") as f:
-            all_alerts = json.load(f)
-            alerts = [a for a in all_alerts if a["time"].startswith(today_str)]
-    except Exception as e:
-        print(f"Failed to load alerts: {e}")
 
-def save_alert_to_file(alert):
-    try:
-        all_alerts = []
-        if os.path.exists(alerts_file_path):
-            with open(alerts_file_path, "r") as f:
-                all_alerts = json.load(f)
-        today = datetime.date.today().strftime("%Y-%m-%d")
-        all_alerts = [a for a in all_alerts if a["time"].startswith(today)]
-        all_alerts.append(alert)
-        with open(alerts_file_path, "w") as f:
-            json.dump(all_alerts, f, indent=2)
-        alerts.append(alert)
-    except Exception as e:
-        print(f"Error saving alert: {e}")
-
-def get_expiry_date(symbol):
-    today = datetime.date.today()
-    if symbol.upper() in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]:
-        days_ahead = 3 - today.weekday()
-        if days_ahead < 0:
-            days_ahead += 7
-        expiry = today + datetime.timedelta(days=days_ahead)
-    else:
-        next_month = today.replace(day=28) + datetime.timedelta(days=4)
-        expiry = next_month - datetime.timedelta(days=next_month.weekday() + 2)
-    return expiry.strftime("%Y-%m-%d")
-
-def get_strike_step(symbol):
-    s = symbol.upper()
-    if "BANKNIFTY" in s:
-        return 100
-    elif "NIFTY" in s:
-        return 50
-    else:
-        return 10
-
-def get_strike_range(spot, step):
-    atm = round(spot / step) * step
-    return [atm + step * i for i in range(-2, 3)]
-
-def find_option(symbol, expiry, strike, option_type):
-    kite = get_kite()
-    instruments = kite.instruments("NFO")
-    for inst in instruments:
-        if (inst["tradingsymbol"].startswith(symbol.upper())
-            and inst["instrument_type"] == ("CE" if option_type == "CALL" else "PE")
-            and inst["strike"] == strike
-            and inst["expiry"].strftime("%Y-%m-%d") == expiry):
-            return inst["tradingsymbol"]
-    return None
-
-def check_option(symbol, is_put):
-    kite = get_kite()
-    try:
-        end = datetime.datetime.now()
-        start = datetime.datetime.combine(end.date(), datetime.time(9, 15))
-        candles = kite.historical_data(symbol, start, end, "5minute")
-        if not candles or len(candles) < 1:
-            return "❌"
-        volumes = [c["volume"] for c in candles]
-        last = candles[-1]
-        is_green = last["close"] > last["open"]
-        is_red = last["close"] < last["open"]
-        is_highest = last["volume"] == max(volumes)
-        if is_highest and ((is_put and is_green) or (not is_put and is_red)):
-            return "✅"
-        return "❌"
-    except Exception as e:
-        print(f"Error checking {symbol}: {e}")
-        return "❌"
+# Load token if available
+if os.path.exists(access_token_path):
+    with open(access_token_path, "r") as f:
+        kite.set_access_token(f.read().strip())
 
 @app.route("/")
-def index():
-    if not session.get("logged_in"):
-        return redirect(url_for("login_page"))
+def home():
     return render_template("index.html", alerts=alerts, kite_api_key=kite_api_key)
 
-@app.route("/login", methods=["GET", "POST"])
-def login_page():
-    if request.method == "POST":
-        username = request.form.get("username")
-        password = request.form.get("password")
-        if username == VALID_USERNAME and password == VALID_PASSWORD:
-            session["logged_in"] = True
-            return redirect(url_for("index"))
-        else:
-            return render_template("login.html", error="Invalid credentials")
-    return render_template("login.html")
-
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect(url_for("login_page"))
+@app.route("/login")
+def login():
+    return redirect(kite.login_url())
 
 @app.route("/login/callback")
 def login_callback():
     request_token = request.args.get("request_token")
-    if not request_token:
-        return "Login failed: No request_token provided"
-    try:
-        kite = KiteConnect(api_key=kite_api_key)
-        data = kite.generate_session(request_token, api_secret=kite_api_secret)
-        access_token = data["access_token"]
-        with open(access_token_path, "w") as f:
-            f.write(access_token)
-        kite.set_access_token(access_token)
-        print("Access token generated and set successfully.")
-        return redirect(url_for("index"))
-    except Exception as e:
-        print(f"Login callback error: {e}")
-        return "Login failed during token generation"
+    data = kite.generate_session(request_token, api_secret=kite_api_secret)
+    kite.set_access_token(data["access_token"])
+    with open(access_token_path, "w") as f:
+        f.write(data["access_token"])
+    print("Access token generated and set successfully.")
+    return redirect("/")
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.json
-    print("Webhook received:", data)
-
-    kite = get_kite()
-    symbol = data.get("symbol")
-    if not symbol:
-        return "Missing symbol", 400
-
     try:
-        ltp_data = kite.ltp(f"NSE:{symbol.upper()}")
-        quote = ltp_data.get(f"NSE:{symbol.upper()}", {})
+        data = request.json
+        symbol = data.get("symbol")
+        if not symbol:
+            return "Missing symbol", 400
 
-        spot_price = quote.get("last_price")
-        ohlc = quote.get("ohlc")
-        if spot_price is None or ohlc is None:
-            print(f"Missing data for symbol: {symbol}")
-            return "Symbol not found or incomplete data", 400
+        # Fetch LTP
+        quote = kite.ltp(f"NSE:{symbol}")
+        spot_price = quote[f"NSE:{symbol}"]["last_price"]
 
-        prev_close = ohlc["close"]
-        percent_change = ((spot_price - prev_close) / prev_close) * 100
+        # Strike price logic (nearest 50)
+        strike = round(spot_price / 50) * 50
 
-        expiry = get_expiry_date(symbol)
-        step = get_strike_step(symbol)
-        strikes = get_strike_range(spot_price, step)
+        # Fetch option tokens
+        instruments = kite.instruments("NSE")
+        today = datetime.now().date()
+        expiry = max(i["expiry"] for i in instruments if i["name"] == symbol and i["instrument_type"] == "OPTSTK")
 
-        put_results = []
-        call_results = []
+        strikes = [strike - 100, strike - 50, strike, strike + 50, strike + 100]
+        call_tokens, put_tokens = {}, {}
 
-        for strike in strikes:
-            pe_symbol = find_option(symbol, expiry, strike, "PUT")
-            ce_symbol = find_option(symbol, expiry, strike, "CALL")
-            put_results.append(check_option(f"NFO:{pe_symbol}", is_put=True) if pe_symbol else "❌")
-            call_results.append(check_option(f"NFO:{ce_symbol}", is_put=False) if ce_symbol else "❌")
+        for inst in instruments:
+            if inst["name"] == symbol and inst["expiry"] == expiry:
+                if inst["strike"] in strikes:
+                    if inst["instrument_type"] == "CE":
+                        call_tokens[inst["strike"]] = inst["instrument_token"]
+                    elif inst["instrument_type"] == "PE":
+                        put_tokens[inst["strike"]] = inst["instrument_token"]
 
-        result = {
-            "symbol": symbol.upper(),
-            "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "ltp": f"₹{spot_price:.2f}",
-            "pct_move": f"{percent_change:+.2f}%",
-            "put_result": " ".join(put_results),
-            "call_result": " ".join(call_results)
+        headers = {"Authorization": f"token {kite_api_key}:{kite.access_token}"}
+
+        def get_candle_data(token):
+            url = f"https://api.kite.trade/instruments/historical/{token}/5minute?from={today}T09:15:00&to={today}T15:30:00&interval=5minute"
+            res = requests.get(url, headers=headers)
+            candles = res.json().get("data", {}).get("candles", [])
+            return candles
+
+        def is_high_volume(candles, is_put=True):
+            if not candles:
+                return "❌"
+            volumes = [c[5] for c in candles]
+            max_vol = max(volumes)
+            latest = candles[-1]
+            is_green = latest[4] > latest[1]
+            is_red = latest[4] < latest[1]
+            if is_put and is_green and latest[5] == max_vol:
+                return "✅"
+            if not is_put and is_red and latest[5] == max_vol:
+                return "✅"
+            return "❌"
+
+        put_result = is_high_volume(get_candle_data(put_tokens.get(strike)), is_put=True)
+        call_result = is_high_volume(get_candle_data(call_tokens.get(strike)), is_put=False)
+
+        alert = {
+            "symbol": symbol,
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "ltp": spot_price,
+            "pct_move": "",  # Removed previous close logic
+            "put_result": put_result,
+            "call_result": call_result
         }
 
-        save_alert_to_file(result)
-        return "Processed", 200
+        alerts.append(alert)
+        if len(alerts) > 20:
+            alerts.pop(0)
+
+        print(f"Processed alert for {symbol}")
+        return "OK", 200
 
     except Exception as e:
-        print(f"Webhook error: {e}")
+        print("Webhook error:", str(e))
         return "Error", 500
 
 if __name__ == "__main__":
