@@ -1,18 +1,30 @@
+# app.py
+# ──────────────────────────────────────────────────────────────────────────────
 import os, json, datetime
 from flask import Flask, request, render_template, redirect, url_for, session
 from kiteconnect import KiteConnect
 
-# ─── Flask app ──────────────────────────────────────────────────────────
+# ─── Time-zone helpers ────────────────────────────────────────────────────────
+try:
+    from zoneinfo import ZoneInfo              # Python ≥3.9
+    IST = ZoneInfo("Asia/Kolkata")
+except ImportError:                            # fallback for older runtimes
+    import pytz
+    IST = pytz.timezone("Asia/Kolkata")
+
+UTC = datetime.timezone.utc
+
+# ─── Flask app ────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "changeme")
 
-# ─── Env / file paths ───────────────────────────────────────────────────
+# ─── Env / file paths ────────────────────────────────────────────────────────
 KITE_API_KEY    = os.getenv("KITE_API_KEY")
 KITE_API_SECRET = os.getenv("KITE_API_SECRET")
 TOKEN_FILE      = "access_token.txt"
 ALERTS_FILE     = "alerts.json"
 
-# ─── Helpers ────────────────────────────────────────────────────────────
+# ─── Helpers ──────────────────────────────────────────────────────────────────
 def get_kite():
     kite = KiteConnect(api_key=KITE_API_KEY)
     if os.path.exists(TOKEN_FILE):
@@ -21,7 +33,8 @@ def get_kite():
     return kite
 
 def today_str():
-    return datetime.date.today().strftime("%Y-%m-%d")
+    """Return YYYY-MM-DD string in IST (not server time)."""
+    return datetime.datetime.now(IST).strftime("%Y-%m-%d")
 
 # Load today’s alerts into memory
 alerts = []
@@ -40,6 +53,7 @@ def save_alert(alert):
         if os.path.exists(ALERTS_FILE):
             with open(ALERTS_FILE) as f:
                 all_alerts = json.load(f)
+        # keep only today’s alerts, then append the new one
         all_alerts = [a for a in all_alerts if a["time"].startswith(today_str())]
         all_alerts.append(alert)
         with open(ALERTS_FILE, "w") as f:
@@ -48,12 +62,13 @@ def save_alert(alert):
     except Exception as e:
         print("Error saving alert:", e)
 
-# ─── Option-utility functions ───────────────────────────────────────────
+# ─── Option-utility functions ────────────────────────────────────────────────
 def expiry_date(symbol):
-    today = datetime.date.today()
-    if symbol.upper() in ["NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY"]:
+    """Weekly expiry for indices, monthly (last Thursday) for stocks."""
+    today = datetime.datetime.now(IST).date()
+    if symbol.upper() in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]:
         # nearest Thursday (weekly)
-        days = 3 - today.weekday()
+        days = 3 - today.weekday()              # Mon=0 … Sun=6
         if days < 0:
             days += 7
         exp = today + datetime.timedelta(days=days)
@@ -69,16 +84,16 @@ def step(symbol):
     return 10
 
 def strike_range(spot, step_size):
-    atm = round(spot/step_size)*step_size
-    return [atm + step_size*i for i in range(-2,3)]  # ATM ±2 strikes
+    atm = round(spot / step_size) * step_size
+    return [atm + step_size * i for i in range(-2, 3)]  # ATM ±2 strikes
 
 def find_option(symbol, expiry, strike, opt_type):
     kite = get_kite()
     for inst in kite.instruments("NFO"):
         if (inst["tradingsymbol"].startswith(symbol.upper())
-            and inst["instrument_type"]==("CE" if opt_type=="CALL" else "PE")
-            and inst["strike"]==strike
-            and inst["expiry"].strftime("%Y-%m-%d")==expiry):
+            and inst["instrument_type"] == ("CE" if opt_type == "CALL" else "PE")
+            and inst["strike"] == strike
+            and inst["expiry"].strftime("%Y-%m-%d") == expiry):
             return inst["tradingsymbol"]
     return None
 
@@ -90,8 +105,8 @@ def check_option(opt_symbol, is_put):
     """
     kite = get_kite()
     try:
-        end   = datetime.datetime.now()
-        start = datetime.datetime.combine(end.date(), datetime.time(9,15))
+        end   = datetime.datetime.now(IST)
+        start = datetime.datetime.combine(end.date(), datetime.time(9, 15, tzinfo=IST))
         candles = kite.historical_data(opt_symbol, start, end, "5minute")
         if not candles:
             print(f"No 5-min candles for {opt_symbol}; skipping.")
@@ -99,26 +114,26 @@ def check_option(opt_symbol, is_put):
         volumes = [c["volume"] for c in candles]
         latest  = candles[-1]
         is_high = latest["volume"] == max(volumes)
-        is_green= latest["close"]  > latest["open"]
-        is_red  = latest["close"]  < latest["open"]
+        is_green = latest["close"] > latest["open"]
+        is_red   = latest["close"] < latest["open"]
         if is_high and ((is_put and is_green) or (not is_put and is_red)):
             return "✅"
     except Exception as e:
         print(f"check_option error for {opt_symbol}:", e)
     return "❌"
 
-# ─── Routes ─────────────────────────────────────────────────────────────
+# ─── Routes ────────────────────────────────────────────────────────────────
 @app.route("/")
 def index():
     if not session.get("logged_in"):
         return redirect(url_for("login_page"))
     return render_template("index.html", alerts=alerts, kite_api_key=KITE_API_KEY)
 
-@app.route("/login", methods=["GET","POST"])
+@app.route("/login", methods=["GET", "POST"])
 def login_page():
-    if request.method=="POST":
-        if (request.form.get("username")==os.getenv("APP_USERNAME","admin") and
-            request.form.get("password")==os.getenv("APP_PASSWORD","price123")):
+    if request.method == "POST":
+        if (request.form.get("username") == os.getenv("APP_USERNAME", "admin") and
+            request.form.get("password") == os.getenv("APP_PASSWORD", "price123")):
             session["logged_in"] = True
             return redirect(url_for("index"))
         return render_template("login.html", error="Invalid credentials")
@@ -152,6 +167,17 @@ def webhook():
     if not symbol:
         return "Missing symbol", 400
 
+    # ── Trigger time – supplied by TradingView or fallback to now(IST) ──
+    trig_epoch = payload.get("trigger_time")    # seconds since 1970-01-01 UTC
+    if trig_epoch is not None:
+        try:
+            trig_dt_utc = datetime.datetime.fromtimestamp(int(trig_epoch), UTC)
+            trig_dt     = trig_dt_utc.astimezone(IST)
+        except Exception:
+            trig_dt = datetime.datetime.now(IST)
+    else:
+        trig_dt = datetime.datetime.now(IST)
+
     kite = get_kite()
     try:
         quote = kite.ltp(f"NSE:{symbol.upper()}")[f"NSE:{symbol.upper()}"]
@@ -165,16 +191,16 @@ def webhook():
         for st in strikes:
             pe = find_option(symbol, expiry, st, "PUT")
             ce = find_option(symbol, expiry, st, "CALL")
-            put_res.append(check_option(f"NFO:{pe}",  True) if pe else "❌")
+            put_res.append(check_option(f"NFO:{pe}",  True)  if pe else "❌")
             call_res.append(check_option(f"NFO:{ce}", False) if ce else "❌")
 
         alert = {
-            "symbol"     : symbol.upper(),
-            "time"       : datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "ltp"        : f"₹{spot_price:.2f}",
-            "pct_move"   : "",                      # prev-close logic removed
-            "put_result" : " ".join(put_res),
-            "call_result": " ".join(call_res)
+            "symbol"      : symbol.upper(),
+            "time"        : trig_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "ltp"         : f"₹{spot_price:.2f}",
+            "pct_move"    : "",                  # prev-close logic optional
+            "put_result"  : " ".join(put_res),
+            "call_result" : " ".join(call_res)
         }
         save_alert(alert)
         print("Processed alert:", alert)
@@ -183,6 +209,6 @@ def webhook():
         print("Webhook error:", e)
         return "Error", 500
 
-# ─── Run local dev ──────────────────────────────────────────────────────
+# ─── Local dev runner ───────────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(debug=True)
