@@ -1,30 +1,30 @@
 # app.py
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 import os, json, datetime
 from flask import Flask, request, render_template, redirect, url_for, session
 from kiteconnect import KiteConnect
 
-# ─── Time-zone helpers ────────────────────────────────────────────────────────
-try:
-    from zoneinfo import ZoneInfo              # Python ≥3.9
+# ─── Time-zone helpers ───────────────────────────────────────────────────────
+try:                                    # Python ≥3.9
+    from zoneinfo import ZoneInfo
     IST = ZoneInfo("Asia/Kolkata")
-except ImportError:                            # fallback for older runtimes
+except ImportError:                     # fallback for older versions
     import pytz
     IST = pytz.timezone("Asia/Kolkata")
 
 UTC = datetime.timezone.utc
 
-# ─── Flask app ────────────────────────────────────────────────────────────────
+# ─── Flask app ──────────────────────────────────────────────────────────────
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "changeme")
 
-# ─── Env / file paths ────────────────────────────────────────────────────────
+# ─── Env / file paths ───────────────────────────────────────────────────────
 KITE_API_KEY    = os.getenv("KITE_API_KEY")
 KITE_API_SECRET = os.getenv("KITE_API_SECRET")
 TOKEN_FILE      = "access_token.txt"
 ALERTS_FILE     = "alerts.json"
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
+# ─── Helpers ────────────────────────────────────────────────────────────────
 def get_kite():
     kite = KiteConnect(api_key=KITE_API_KEY)
     if os.path.exists(TOKEN_FILE):
@@ -33,10 +33,10 @@ def get_kite():
     return kite
 
 def today_str():
-    """Return YYYY-MM-DD string in IST (not server time)."""
+    """Return YYYY-MM-DD string in IST (not server’s UTC)."""
     return datetime.datetime.now(IST).strftime("%Y-%m-%d")
 
-# Load today’s alerts into memory
+# Load only today’s alerts into memory
 alerts = []
 if os.path.exists(ALERTS_FILE):
     try:
@@ -47,13 +47,12 @@ if os.path.exists(ALERTS_FILE):
         print("Failed to load alerts:", e)
 
 def save_alert(alert):
-    """Persist alert to file and in-memory list (only today)."""
+    """Persist alert to file and keep in-memory list in sync (today only)."""
     try:
         all_alerts = []
         if os.path.exists(ALERTS_FILE):
             with open(ALERTS_FILE) as f:
                 all_alerts = json.load(f)
-        # keep only today’s alerts, then append the new one
         all_alerts = [a for a in all_alerts if a["time"].startswith(today_str())]
         all_alerts.append(alert)
         with open(ALERTS_FILE, "w") as f:
@@ -62,18 +61,15 @@ def save_alert(alert):
     except Exception as e:
         print("Error saving alert:", e)
 
-# ─── Option-utility functions ────────────────────────────────────────────────
+# ─── Option helpers ────────────────────────────────────────────────────────
 def expiry_date(symbol):
-    """Weekly expiry for indices, monthly (last Thursday) for stocks."""
+    """Indices → nearest Thursday; stocks → last Thursday of month."""
     today = datetime.datetime.now(IST).date()
     if symbol.upper() in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]:
-        # nearest Thursday (weekly)
-        days = 3 - today.weekday()              # Mon=0 … Sun=6
-        if days < 0:
-            days += 7
+        days = 3 - today.weekday()           # Monday=0
+        if days < 0: days += 7
         exp = today + datetime.timedelta(days=days)
     else:
-        # monthly – last Thursday
         next_month = today.replace(day=28) + datetime.timedelta(days=4)
         exp = next_month - datetime.timedelta(days=next_month.weekday() + 2)
     return exp.strftime("%Y-%m-%d")
@@ -85,7 +81,7 @@ def step(symbol):
 
 def strike_range(spot, step_size):
     atm = round(spot / step_size) * step_size
-    return [atm + step_size * i for i in range(-2, 3)]  # ATM ±2 strikes
+    return [atm + step_size * i for i in range(-2, 3)]    # ATM ±2 strikes
 
 def find_option(symbol, expiry, strike, opt_type):
     kite = get_kite()
@@ -99,9 +95,9 @@ def find_option(symbol, expiry, strike, opt_type):
 
 def check_option(opt_symbol, is_put):
     """
-    ✅  if latest 5-min candle is highest-volume of the day
-         and candle colour matches PUT/CALL rule.
-    ❌  otherwise or if no candles yet.
+    ✅ = latest 5-min candle is highest-volume of the day AND
+         colour rule: green for PUT, red for CALL
+    ❌ otherwise (or no candles).
     """
     kite = get_kite()
     try:
@@ -113,14 +109,14 @@ def check_option(opt_symbol, is_put):
             return "❌"
         volumes = [c["volume"] for c in candles]
         latest  = candles[-1]
-        is_high = latest["volume"] == max(volumes)
+        if latest["volume"] != max(volumes):
+            return "❌"
         is_green = latest["close"] > latest["open"]
         is_red   = latest["close"] < latest["open"]
-        if is_high and ((is_put and is_green) or (not is_put and is_red)):
-            return "✅"
+        return "✅" if ((is_put and is_green) or (not is_put and is_red)) else "❌"
     except Exception as e:
         print(f"check_option error for {opt_symbol}:", e)
-    return "❌"
+        return "❌"
 
 # ─── Routes ────────────────────────────────────────────────────────────────
 @app.route("/")
@@ -167,9 +163,9 @@ def webhook():
     if not symbol:
         return "Missing symbol", 400
 
-    # ── Trigger time – supplied by TradingView or fallback to now(IST) ──
-    trig_epoch = payload.get("trigger_time")    # seconds since 1970-01-01 UTC
-    if trig_epoch is not None:
+    # ── Use TradingView’s trigger_time or fallback to now(IST) ───────────
+    trig_epoch = payload.get("trigger_time")      # string of epoch-seconds
+    if trig_epoch:
         try:
             trig_dt_utc = datetime.datetime.fromtimestamp(int(trig_epoch), UTC)
             trig_dt     = trig_dt_utc.astimezone(IST)
@@ -180,7 +176,7 @@ def webhook():
 
     kite = get_kite()
     try:
-        quote = kite.ltp(f"NSE:{symbol.upper()}")[f"NSE:{symbol.upper()}"]
+        quote      = kite.ltp(f"NSE:{symbol.upper()}")[f"NSE:{symbol.upper()}"]
         spot_price = quote["last_price"]
 
         expiry  = expiry_date(symbol)
@@ -195,12 +191,12 @@ def webhook():
             call_res.append(check_option(f"NFO:{ce}", False) if ce else "❌")
 
         alert = {
-            "symbol"      : symbol.upper(),
-            "time"        : trig_dt.strftime("%Y-%m-%d %H:%M:%S"),
-            "ltp"         : f"₹{spot_price:.2f}",
-            "pct_move"    : "",                  # prev-close logic optional
-            "put_result"  : " ".join(put_res),
-            "call_result" : " ".join(call_res)
+            "symbol"     : symbol.upper(),
+            "time"       : trig_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "ltp"        : f"₹{spot_price:.2f}",
+            "pct_move"   : "",             # optional: add %-move if you want
+            "put_result" : " ".join(put_res),
+            "call_result": " ".join(call_res),
         }
         save_alert(alert)
         print("Processed alert:", alert)
@@ -209,6 +205,6 @@ def webhook():
         print("Webhook error:", e)
         return "Error", 500
 
-# ─── Local dev runner ───────────────────────────────────────────────────
+# ─── Local dev runner ────────────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(debug=True)
