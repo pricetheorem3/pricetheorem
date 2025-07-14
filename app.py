@@ -1,6 +1,6 @@
-# app.py  –  robust trigger-time parser + all prior fixes
+# app.py  –  option-chain screener, expiry read from live chain
 # ─────────────────────────────────────────────────────────────────────────────
-import os, json, datetime
+import os, json, datetime, calendar
 from flask import Flask, request, render_template, redirect, url_for, session
 from kiteconnect import KiteConnect
 
@@ -8,7 +8,7 @@ from kiteconnect import KiteConnect
 try:
     from zoneinfo import ZoneInfo          # Python ≥3.9
     IST = ZoneInfo("Asia/Kolkata")
-except ImportError:                        # older runtimes
+except ImportError:
     import pytz
     IST = pytz.timezone("Asia/Kolkata")
 
@@ -41,29 +41,30 @@ def get_instruments():
         INSTR_DATE  = today
     return INSTRUMENTS
 
-# ─── Expiry helpers ─────────────────────────────────────────────────────────
-def last_thu(y, m):
-    d = datetime.date(y, m, 28) + datetime.timedelta(days=4)
-    return d - datetime.timedelta(days=d.weekday() + 2)
+# ─── Expiry helper (reads chain) ────────────────────────────────────────────
+def next_expiry_from_chain(symbol: str) -> datetime.date:
+    """Return the nearest future option expiry date for `symbol`."""
+    s      = symbol.upper()
+    today  = datetime.datetime.now(IST).date()
+    dates  = sorted({
+        i["expiry"] for i in get_instruments()
+        if i["instrument_type"] in {"PE", "CE"}
+        and (i["name"] == s or i["tradingsymbol"].startswith(s))
+    })
+    for d in dates:
+        if d >= today:
+            return d
+    return dates[-1]    # fallback (shouldn’t happen)
 
-def expiry_date(sym):
-    today = datetime.datetime.now(IST).date()
-    if sym.upper() in {"NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY"}:
-        offs = 3 - today.weekday()
-        if offs < 0: offs += 7
-        return (today + datetime.timedelta(days=offs)).strftime("%Y-%m-%d")
-    exp = last_thu(today.year, today.month)
-    if today > exp:                           # series already expired
-        nxt = (today + datetime.timedelta(days=32)).replace(day=1)
-        exp = last_thu(nxt.year, nxt.month)
-    return exp.strftime("%Y-%m-%d")
+def expiry_date(symbol: str) -> str:
+    return next_expiry_from_chain(symbol).strftime("%Y-%m-%d")
 
 # ─── Option-chain utilities ────────────────────────────────────────────────
 def _matches(sym, exp):
     s = sym.upper()
     return [
         i for i in get_instruments()
-        if i["instrument_type"] in {"PE","CE"}
+        if i["instrument_type"] in {"PE", "CE"}
         and i["expiry"] == exp
         and (i["name"] == s or i["tradingsymbol"].startswith(s))
     ]
@@ -71,20 +72,17 @@ def _matches(sym, exp):
 def strikes_from_chain(sym, exp_str, spot, width=WIDTH):
     exp = datetime.datetime.strptime(exp_str, "%Y-%m-%d").date()
     m   = _matches(sym, exp)
-    if not m:                                  # fallback → next month
-        nxt = (exp + datetime.timedelta(days=32)).replace(day=1)
-        exp = last_thu(nxt.year, nxt.month)
-        m   = _matches(sym, exp)
-    if not m: return []
+    if not m:                     # edge-case: no contracts yet
+        return []
     strikes = sorted({i["strike"] for i in m})
-    atm     = min(strikes, key=lambda s: abs(s-spot))
+    atm     = min(strikes, key=lambda s: abs(s - spot))
     i       = strikes.index(atm)
-    return strikes[max(0,i-width): i+width+1]
+    return strikes[max(0, i - width): i + width + 1]
 
 def option_symbol(sym, exp_str, strike, kind):
     exp = datetime.datetime.strptime(exp_str, "%Y-%m-%d").date()
     for i in get_instruments():
-        if (i["instrument_type"] == ("PE" if kind=="PUT" else "CE")
+        if (i["instrument_type"] == ("PE" if kind == "PUT" else "CE")
             and i["strike"] == strike
             and i["expiry"] == exp
             and (i["name"] == sym.upper()
@@ -92,18 +90,20 @@ def option_symbol(sym, exp_str, strike, kind):
             return i["tradingsymbol"]
     return None
 
-# ─── 5-minute candle check ────────────────────────────────────────────────
+# ─── 5-minute candle rule ──────────────────────────────────────────────────
 def check_option(opt, is_put):
     kite = get_kite()
     try:
         end   = datetime.datetime.now(IST)
-        start = datetime.datetime.combine(end.date(), datetime.time(9,15,tzinfo=IST))
+        start = datetime.datetime.combine(end.date(), datetime.time(9, 15, tzinfo=IST))
         cds   = kite.historical_data(opt, start, end, "5minute")
-        if not cds: return "❌"
-        lat   = cds[-1]
-        if lat["volume"] != max(c["volume"] for c in cds): return "❌"
-        green = lat["close"] > lat["open"]
-        red   = lat["close"]  < lat["open"]
+        if not cds:
+            return "❌"
+        latest = cds[-1]
+        if latest["volume"] != max(c["volume"] for c in cds):
+            return "❌"
+        green = latest["close"] > latest["open"]
+        red   = latest["close"]  < latest["open"]
         return "✅" if ((is_put and green) or (not is_put and red)) else "❌"
     except Exception as e:
         print("check_option error:", e)
@@ -124,26 +124,28 @@ def save_alert(a):
     try:
         all_a = []
         if os.path.exists(ALERTS_FILE):
-            with open(ALERTS_FILE) as f: all_a = json.load(f)
+            with open(ALERTS_FILE) as f:
+                all_a = json.load(f)
         all_a = [x for x in all_a if x["time"].startswith(today())]
         all_a.append(a)
-        with open(ALERTS_FILE,"w") as f: json.dump(all_a, f, indent=2)
+        with open(ALERTS_FILE, "w") as f:
+            json.dump(all_a, f, indent=2)
         alerts.append(a)
     except Exception as e:
         print("Save alert:", e)
 
-# ─── Routes (login unchanged) ──────────────────────────────────────────────
+# ─── Routes (login logic unchanged) ───────────────────────────────────────
 @app.route("/")
 def index():
     if not session.get("logged_in"):
         return redirect(url_for("login_page"))
     return render_template("index.html", alerts=alerts, kite_api_key=KITE_API_KEY)
 
-@app.route("/login", methods=["GET","POST"])
+@app.route("/login", methods=["GET", "POST"])
 def login_page():
-    if request.method=="POST":
-        if (request.form.get("username")==os.getenv("APP_USERNAME","admin")
-            and request.form.get("password")==os.getenv("APP_PASSWORD","price123")):
+    if request.method == "POST":
+        if (request.form.get("username") == os.getenv("APP_USERNAME", "admin")
+            and request.form.get("password") == os.getenv("APP_PASSWORD", "price123")):
             session["logged_in"] = True
             return redirect(url_for("index"))
         return render_template("login.html", error="Invalid credentials")
@@ -157,11 +159,13 @@ def logout():
 @app.route("/login/callback")
 def login_callback():
     rt = request.args.get("request_token")
-    if not rt: return "No request_token", 400
+    if not rt:
+        return "No request_token", 400
     try:
         kite = KiteConnect(api_key=KITE_API_KEY)
         data = kite.generate_session(rt, api_secret=KITE_API_SECRET)
-        with open(TOKEN_FILE,"w") as f: f.write(data["access_token"])
+        with open(TOKEN_FILE, "w") as f:
+            f.write(data["access_token"])
         print("Access token saved.")
         return redirect(url_for("index"))
     except Exception as e:
@@ -171,21 +175,19 @@ def login_callback():
 # ─── Webhook core ──────────────────────────────────────────────────────────
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    p       = request.json or {}
-    symbol  = p.get("symbol")
-    if not symbol: return "Missing symbol", 400
+    p = request.json or {}
+    symbol = p.get("symbol")
+    if not symbol:
+        return "Missing symbol", 400
 
-    # ── Robust trigger-time parser ───────────────────────────────────────
+    # robust trigger-time parser
     trg = p.get("trigger_time")
     if trg:
         try:
-            # digits → epoch seconds
             trig_dt = datetime.datetime.fromtimestamp(int(trg), UTC).astimezone(IST)
         except (ValueError, TypeError):
             try:
-                # ISO 8601 e.g. "2025-07-14T08:50:02Z"
-                iso   = trg.rstrip("Z")            # strip trailing Z
-                iso_dt= datetime.datetime.fromisoformat(iso)
+                iso_dt = datetime.datetime.fromisoformat(trg.rstrip("Z"))
                 if iso_dt.tzinfo is None:
                     iso_dt = iso_dt.replace(tzinfo=UTC)
                 trig_dt = iso_dt.astimezone(IST)
@@ -193,18 +195,20 @@ def webhook():
                 trig_dt = datetime.datetime.now(IST)
     else:
         trig_dt = datetime.datetime.now(IST)
-    # ────────────────────────────────────────────────────────────────────
 
     kite = get_kite()
     try:
         spot = kite.ltp(f"NSE:{symbol.upper()}")[f"NSE:{symbol.upper()}"]["last_price"]
         expiry  = expiry_date(symbol)
         strikes = strikes_from_chain(symbol, expiry, spot)
+
         if not strikes:
             save_alert({
-                "symbol": symbol.upper(), "time": trig_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                "ltp": f"₹{spot:.2f}", "put_result": "No option chain",
-                "call_result": "No option chain"
+                "symbol"     : symbol.upper(),
+                "time"       : trig_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "ltp"        : f"₹{spot:.2f}",
+                "put_result" : "No option chain",
+                "call_result": "No option chain",
             })
             return "OK", 200
 
@@ -216,11 +220,11 @@ def webhook():
             call_tags.append(f"{st}{check_option(f'NFO:{ce}', False) if ce else '❌'}")
 
         save_alert({
-            "symbol": symbol.upper(),
-            "time"  : trig_dt.strftime("%Y-%m-%d %H:%M:%S"),
-            "ltp"   : f"₹{spot:.2f}",
+            "symbol"     : symbol.upper(),
+            "time"       : trig_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "ltp"        : f"₹{spot:.2f}",
             "put_result" : "  ".join(put_tags),
-            "call_result": "  ".join(call_tags)
+            "call_result": "  ".join(call_tags),
         })
         return "OK", 200
     except Exception as e:
