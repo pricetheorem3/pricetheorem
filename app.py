@@ -1,21 +1,21 @@
-# app.py  –  option-chain + strike-tag display
+# app.py  –  option-chain strikes, relaxed filter, badge-ready
 # ─────────────────────────────────────────────────────────────────────────────
 import os, json, datetime
 from flask import Flask, request, render_template, redirect, url_for, session
 from kiteconnect import KiteConnect
 
 # ─── Time-zone helpers ───────────────────────────────────────────────────────
-try:
-    from zoneinfo import ZoneInfo          # Python ≥3.9
+try:                                    # Python ≥3.9
+    from zoneinfo import ZoneInfo
     IST = ZoneInfo("Asia/Kolkata")
-except ImportError:                        # fallback for older versions
+except ImportError:                     # older runtimes
     import pytz
     IST = pytz.timezone("Asia/Kolkata")
 
 UTC = datetime.timezone.utc
 
 # ─── Config ──────────────────────────────────────────────────────────────────
-WIDTH = 2            # strikes either side of ATM → ATM ± 2  (total 5 strikes)
+WIDTH = 2            # strikes either side of ATM → ATM ± 2
 
 # ─── Flask app ──────────────────────────────────────────────────────────────
 app = Flask(__name__)
@@ -47,43 +47,67 @@ def get_instruments():
     return INSTRUMENTS
 
 # ─── Expiry helper ──────────────────────────────────────────────────────────
+def last_thursday(year, month):
+    """Return last-Thursday date object of given month."""
+    last_day = datetime.date(year, month, 28) + datetime.timedelta(days=4)
+    return last_day - datetime.timedelta(days=last_day.weekday() + 2)
+
 def expiry_date(symbol):
     today = datetime.datetime.now(IST).date()
-    if symbol.upper() in {"NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY"}:
-        # nearest Thursday
-        days = 3 - today.weekday()
+    if symbol.upper() in {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}:
+        days = 3 - today.weekday()            # nearest Thursday
         if days < 0: days += 7
-        exp = today + datetime.timedelta(days=days)
-    else:
-        # last Thursday of month
-        tmp = today.replace(day=28) + datetime.timedelta(days=4)
-        exp = tmp - datetime.timedelta(days=tmp.weekday() + 2)
+        return (today + datetime.timedelta(days=days)).strftime("%Y-%m-%d")
+    # stocks → last Thursday of month
+    exp = last_thursday(today.year, today.month)
+    # if we're already beyond that, pick next month
+    if today > exp:
+        nxt_month = (today + datetime.timedelta(days=32)).replace(day=1)
+        exp = last_thursday(nxt_month.year, nxt_month.month)
     return exp.strftime("%Y-%m-%d")
 
 # ─── Strike utilities ───────────────────────────────────────────────────────
-def strikes_from_chain(symbol, expiry, spot, width=WIDTH):
-    instruments = get_instruments()
-    strikes_set = {
-        inst["strike"]
-        for inst in instruments
-        if inst["name"] == symbol.upper()
-        and inst["expiry"].strftime("%Y-%m-%d") == expiry
-    }
-    if not strikes_set:
-        return []
-    atm = min(strikes_set, key=lambda s: abs(s - spot))
-    strikes_sorted = sorted(strikes_set)
-    i = strikes_sorted.index(atm)
-    start = max(0, i - width)
-    end   = min(len(strikes_sorted), i + width + 1)
-    return strikes_sorted[start:end]
+def _matching_instruments(symbol, expiry_date_obj):
+    """Return option contracts for symbol+expiry (relaxed filter)."""
+    sy_upper = symbol.upper()
+    return [
+        inst for inst in get_instruments()
+        if inst["instrument_type"] in {"PE", "CE"}
+        and inst["expiry"].date() == expiry_date_obj
+        and (
+            inst["name"] == sy_upper or
+            inst["tradingsymbol"].startswith(sy_upper)  # handles GRANULES etc.
+        )
+    ]
 
-def option_symbol(symbol, expiry, strike, opt_type):
+def strikes_from_chain(symbol, expiry_str, spot, width=WIDTH):
+    """Return strikes centred around ATM; fallback to next-month if needed."""
+    expiry_obj = datetime.datetime.strptime(expiry_str, "%Y-%m-%d").date()
+    matches    = _matching_instruments(symbol, expiry_obj)
+
+    if not matches:  # fallback → next-month series
+        next_month = (expiry_obj + datetime.timedelta(days=32)).replace(day=1)
+        next_exp   = last_thursday(next_month.year, next_month.month)
+        matches    = _matching_instruments(symbol, next_exp)
+
+    if not matches:
+        return []            # still nothing – let caller log "N/A"
+
+    strikes = sorted({inst["strike"] for inst in matches})
+    atm     = min(strikes, key=lambda s: abs(s - spot))
+    i       = strikes.index(atm)
+    start   = max(0, i - width)
+    end     = min(len(strikes), i + width + 1)
+    return strikes[start:end]
+
+def option_symbol(symbol, expiry_str, strike, opt_type):
+    expiry_obj = datetime.datetime.strptime(expiry_str, "%Y-%m-%d").date()
     for inst in get_instruments():
-        if (inst["name"] == symbol.upper()
+        if (inst["instrument_type"] == ("PE" if opt_type=="PUT" else "CE")
             and inst["strike"] == strike
-            and inst["expiry"].strftime("%Y-%m-%d") == expiry
-            and inst["instrument_type"] == ("PE" if opt_type=="PUT" else "CE")):
+            and inst["expiry"].date() == expiry_obj
+            and (inst["name"] == symbol.upper()
+                 or inst["tradingsymbol"].startswith(symbol.upper()))):
             return inst["tradingsymbol"]
     return None
 
@@ -95,11 +119,10 @@ def check_option(opt_symbol, is_put):
         start = datetime.datetime.combine(end.date(), datetime.time(9,15,tzinfo=IST))
         cds   = kite.historical_data(opt_symbol, start, end, "5minute")
         if not cds: return "❌"
-        vols   = [c["volume"] for c in cds]
         latest = cds[-1]
-        if latest["volume"] != max(vols): return "❌"
-        green = latest["close"] > latest["open"]
-        red   = latest["close"]  < latest["open"]
+        if latest["volume"] != max(c["volume"] for c in cds): return "❌"
+        green  = latest["close"] > latest["open"]
+        red    = latest["close"]  < latest["open"]
         return "✅" if ((is_put and green) or (not is_put and red)) else "❌"
     except Exception as e:
         print("check_option error:", e)
@@ -112,8 +135,7 @@ alerts = []
 if os.path.exists(ALERTS_FILE):
     try:
         with open(ALERTS_FILE) as f:
-            all_a = json.load(f)
-            alerts = [a for a in all_a if a["time"].startswith(today_str())]
+            alerts = [a for a in json.load(f) if a["time"].startswith(today_str())]
     except Exception as e:
         print("Load alerts:", e)
 
@@ -172,7 +194,7 @@ def webhook():
     symbol  = payload.get("symbol")
     if not symbol: return "Missing symbol", 400
 
-    # trigger time (epoch-sec) from TradingView
+    # trigger time from TradingView
     trg = payload.get("trigger_time")
     if trg:
         try: trig_dt = datetime.datetime.fromtimestamp(int(trg), UTC).astimezone(IST)
@@ -187,7 +209,17 @@ def webhook():
 
         expiry  = expiry_date(symbol)
         strikes = strikes_from_chain(symbol, expiry, spot_price)
-        if not strikes: return f"No strikes for {symbol}", 200
+        if not strikes:
+            alert = {
+                "symbol"     : symbol.upper(),
+                "time"       : trig_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "ltp"        : f"₹{spot_price:.2f}",
+                "put_result" : "No option chain",
+                "call_result": "No option chain",
+            }
+            save_alert(alert)
+            print("Skipped (no F&O):", alert)
+            return "OK", 200
 
         put_tags, call_tags = [], []
         for st in strikes:
@@ -202,7 +234,7 @@ def webhook():
             "symbol"     : symbol.upper(),
             "time"       : trig_dt.strftime("%Y-%m-%d %H:%M:%S"),
             "ltp"        : f"₹{spot_price:.2f}",
-            "put_result" : "  ".join(put_tags),     # strike+mark
+            "put_result" : "  ".join(put_tags),
             "call_result": "  ".join(call_tags),
         }
         save_alert(alert)
@@ -215,4 +247,3 @@ def webhook():
 # ─── Local dev runner ───────────────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(debug=True)
-
