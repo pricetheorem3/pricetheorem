@@ -146,26 +146,25 @@ def login_callback():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    kite = get_kite()
     data = request.json
+    print("Webhook received:", data)
+
+    kite = get_kite()
     symbol = data.get("symbol")
     if not symbol:
         return "Missing symbol", 400
+
     try:
         ltp_data = kite.ltp(f"NSE:{symbol.upper()}")
-        quote = ltp_data.get(f"NSE:{symbol.upper()}")
+        quote = ltp_data.get(f"NSE:{symbol.upper()}", {})
 
-        if not quote:
-            print(f"LTP missing for {symbol}: {ltp_data}")
-            return "No quote data", 500
+        spot_price = quote.get("last_price")
+        ohlc = quote.get("ohlc")
+        if spot_price is None or ohlc is None:
+            print(f"Missing data for symbol: {symbol}")
+            return "Symbol not found or incomplete data", 400
 
-        spot_price = quote.get("last_price", 0)
-        prev_close = quote.get("ohlc", {}).get("close")
-
-        if spot_price == 0 or prev_close is None:
-            print(f"Incomplete price data for {symbol}: {quote}")
-            return "Incomplete price data", 500
-
+        prev_close = ohlc["close"]
         percent_change = ((spot_price - prev_close) / prev_close) * 100
 
         expiry = get_expiry_date(symbol)
