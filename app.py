@@ -17,9 +17,15 @@ alerts_file_path = "alerts.json"
 
 def get_kite():
     kite = KiteConnect(api_key=kite_api_key)
-    if os.path.exists(access_token_path):
+
+    access_token = os.environ.get("KITE_ACCESS_TOKEN")
+    if not access_token and os.path.exists(access_token_path):
         with open(access_token_path, "r") as f:
-            kite.set_access_token(f.read().strip())
+            access_token = f.read().strip()
+
+    if access_token:
+        kite.set_access_token(access_token)
+
     return kite
 
 alerts = []
@@ -140,7 +146,8 @@ def login_callback():
         with open(access_token_path, "w") as f:
             f.write(access_token)
 
-        kite.set_access_token(access_token)
+        os.environ["KITE_ACCESS_TOKEN"] = access_token
+
         print("Access token generated and set successfully.")
         return redirect(url_for("index"))
 
@@ -193,4 +200,5 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
 
