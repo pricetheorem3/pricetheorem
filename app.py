@@ -1,4 +1,3 @@
-
 import os
 import json
 import datetime
@@ -8,7 +7,7 @@ from kiteconnect import KiteConnect
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "changeme")
 
-# Simple user credentials (can be moved to env later)
+# Credentials
 VALID_USERNAME = os.environ.get("APP_USERNAME", "admin")
 VALID_PASSWORD = os.environ.get("APP_PASSWORD", "price123")
 
@@ -18,12 +17,12 @@ kite = KiteConnect(api_key=kite_api_key)
 access_token_path = "access_token.txt"
 alerts_file_path = "alerts.json"
 
-# Authorize kite
+# Load access token if exists
 if os.path.exists(access_token_path):
     with open(access_token_path, "r") as f:
         kite.set_access_token(f.read().strip())
 
-# Load today's alerts only
+# Load today's alerts
 alerts = []
 today_str = datetime.date.today().strftime("%Y-%m-%d")
 if os.path.exists(alerts_file_path):
@@ -168,5 +167,30 @@ def webhook():
         print(f"Webhook error: {e}")
         return "Error", 500
 
+# ✅ NEW: Kite login callback route
+@app.route("/login/callback")
+def login_callback():
+    request_token = request.args.get("request_token")
+    if not request_token:
+        return "Login failed: No request_token provided"
+
+    try:
+        kite = KiteConnect(api_key=kite_api_key)
+        data = kite.generate_session(request_token, api_secret=kite_api_secret)
+        access_token = data["access_token"]
+
+        # Save access token to file
+        with open(access_token_path, "w") as f:
+            f.write(access_token)
+
+        kite.set_access_token(access_token)
+        print("Access token generated and set successfully.")
+        return redirect(url_for("index"))
+
+    except Exception as e:
+        print(f"Login callback error: {e}")
+        return "Login failed during token generation"
+
 if __name__ == "__main__":
     app.run(debug=True)
+
