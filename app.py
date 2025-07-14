@@ -19,10 +19,7 @@ def get_kite():
     kite = KiteConnect(api_key=kite_api_key)
     if os.path.exists(access_token_path):
         with open(access_token_path, "r") as f:
-            access_token = f.read().strip()
-            kite.set_access_token(access_token)
-    else:
-        print("❌ access_token.txt not found.")
+            kite.set_access_token(f.read().strip())
     return kite
 
 alerts = []
@@ -134,19 +131,15 @@ def login_callback():
     request_token = request.args.get("request_token")
     if not request_token:
         return "Login failed: No request_token provided"
-
     try:
         kite = KiteConnect(api_key=kite_api_key)
         data = kite.generate_session(request_token, api_secret=kite_api_secret)
         access_token = data["access_token"]
-
         with open(access_token_path, "w") as f:
             f.write(access_token)
-
         kite.set_access_token(access_token)
         print("Access token generated and set successfully.")
         return redirect(url_for("index"))
-
     except Exception as e:
         print(f"Login callback error: {e}")
         return "Login failed during token generation"
@@ -158,17 +151,21 @@ def webhook():
     symbol = data.get("symbol")
     if not symbol:
         return "Missing symbol", 400
-
     try:
         ltp_data = kite.ltp(f"NSE:{symbol.upper()}")
         quote = ltp_data.get(f"NSE:{symbol.upper()}")
 
-        if not quote or "ohlc" not in quote:
-            print(f"Invalid LTP response for {symbol}: {quote}")
-            return "Invalid LTP response", 500
+        if not quote:
+            print(f"LTP missing for {symbol}: {ltp_data}")
+            return "No quote data", 500
 
-        spot_price = quote["last_price"]
-        prev_close = quote["ohlc"]["close"]
+        spot_price = quote.get("last_price", 0)
+        prev_close = quote.get("ohlc", {}).get("close")
+
+        if spot_price == 0 or prev_close is None:
+            print(f"Incomplete price data for {symbol}: {quote}")
+            return "Incomplete price data", 500
+
         percent_change = ((spot_price - prev_close) / prev_close) * 100
 
         expiry = get_expiry_date(symbol)
