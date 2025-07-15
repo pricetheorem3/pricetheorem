@@ -473,5 +473,7 @@ def webhook():
         print("Webhook error:", e)
         return "Error", 500
 
-# ─── Local dev runner ─────────────────────────────────────────────────────
-if __name__ == "__main
+# ─── Local dev runner ───────────────────────────────────────────────
+if __name__ == "__main__":
+    app.run(debug=True)
+
