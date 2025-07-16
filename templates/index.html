@@ -1,91 +1,69 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Price Theorem Alerts</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css">
-    <style>
-        /* tiny additions so the new “Metrics” cell wraps nicely on mobile */
-        .metrics   { line-height:1.1; font-size:.82rem; white-space:nowrap; }
-        .metrics span { display:inline-block; padding-right:.35rem; }
-        @media (max-width:720px){
-            .table-container{ overflow-x:auto; }
-            table thead tr th, table tbody tr td{ padding:.4rem .5rem; }
-            .metrics span{ display:block; }          /* stack values on very narrow screens */
-        }
-    </style>
-</head>
-<body>
-<div class="container">
-    <h1>📈 Price Theorem – iGOT Option Volume Results</h1>
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8">
+<title>Price Theorem Alerts</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+<style>
+body{font-family:Inter,sans-serif;margin:2rem;background:#f9f9f9}
+table{width:100%;border-collapse:collapse;background:#fff}
+th,td{border:1px solid #ccc;padding:8px 10px;text-align:center}
+.metrics span{display:inline-block;font-size:.8em;padding:0 5px}
+.filter-buttons button{margin-right:6px;margin-bottom:6px}
+@media(max-width:680px){th,td{font-size:.75em}}
+</style></head><body>
 
-    <div class="login">
-        <a href="https://kite.trade/connect/login?api_key={{ kite_api_key }}" class="login-btn">🔐 Login to Kite</a>
-        <p><small>Login daily to refresh your access‑token</small></p>
-    </div>
+<h2>📈 Price Theorem — iGOT Alerts</h2>
 
-    <div class="search-box">
-        <input type="text"
-               id="searchInput"
-               placeholder="🔍 Search stock / time / strike…"
-               onkeyup="filterTable()">
-    </div>
+<form method="get" style="margin-bottom:1rem">
+  <label>📅 Date:</label>
+  <input type="date" name="date" value="{{ selected_date }}">
+  <button type="submit">View</button>
+</form>
 
-    <div class="table-container">
-        <table>
-            <thead>
-                <tr>
-                    <th>Stock</th>
-                    <th>Time</th>
-                    <th>Price</th>
-                    <th>PUT (±2)</th>
-                    <th>CALL (±2)</th>
-                    <th data-sort-method="none">Option Metrics</th>
-                </tr>
-            </thead>
-            <tbody>
-            {% for alert in alerts %}
-                <tr>
-                    <td>{{ alert.symbol }}</td>
-                    <td>{{ alert.time }}</td>
-                    <td>{{ alert.ltp }}</td>
-
-                    <!-- existing volume‑spike summaries -->
-                    <td class="put"  data-sort="{{ alert['put_result'].count('✅') }}">{{ alert.put_result }}</td>
-                    <td class="call" data-sort="{{ alert['call_result'].count('✅') }}">{{ alert.call_result }}</td>
-
-                    <!-- new compact metrics column -->
-                    <td class="metrics">
-                        <span><strong>ΔCE</strong> {{ alert['ΔCE'] }}</span>
-                        <span><strong>ΔPE</strong> {{ alert['ΔPE'] }}</span>
-                        <span><strong>Sk</strong> {{ alert['Skew'] }}</span>
-                        <span><strong>ΔOIᵖ</strong> {{ alert['ΔOI_PUT'] }}</span>
-                        <span><strong>Vol×</strong> {{ alert['call_vol'] }}</span>
-                        <span><strong>T:</strong> {{ alert['trend'] }}</span>
-                        <span><strong>F:</strong> {{ alert['flag'] }}</span>
-                    </td>
-                </tr>
-            {% endfor %}
-            </tbody>
-        </table>
-    </div>
+<div class="filter-buttons">
+  <button onclick="fTrend('')">All</button>
+  <button onclick="fTrend('Bullish')">Bullish</button>
+  <button onclick="fTrend('Bearish')">Bearish</button>
+  <button onclick="fFlag('Flat PE')">Flat PE</button>
+  <button onclick="fFlag('Strong CE')">Strong CE</button>
+  <button onclick="fFlag('IV Pump')">IV Pump</button>
+  <button onclick="fFlag('IV Crush')">IV Crush</button>
 </div>
 
-<script src="https://unpkg.com/tablesort@5.2.1/dist/tablesort.min.js"></script>
+<table><thead><tr>
+  <th>Symbol</th><th>Time</th><th>LTP</th>
+  <th>PUT</th><th>CALL</th><th>Metrics</th>
+</tr></thead><tbody>
+{% for a in alerts %}
+<tr>
+  <td>{{ a.symbol }}</td>
+  <td>{{ a.time }}</td>
+  <td>{{ a.ltp }}</td>
+  <td>{{ a.put_result }}</td>
+  <td>{{ a.call_result }}</td>
+  <td class="metrics">
+    <span><strong>ΔCE:</strong>{{ a.dce }}</span>
+    <span><strong>ΔPE:</strong>{{ a.dpe }}</span>
+    <span><strong>Sk:</strong>{{ a.skew }}</span>
+    <span><strong>IVΔC:</strong>{{ a.ivd_ce }}</span>
+    <span><strong>IVΔP:</strong>{{ a.ivd_pe }}</span>
+    <span><strong>Vol×:</strong>{{ a.call_vol }}</span>
+    <span><strong>T:</strong>{{ a.trend }}</span>
+    <span><strong>F:</strong>{{ a.flag }}</span>
+    <span><strong>IV:</strong>{{ a.iv_flag }}</span>
+  </td>
+</tr>
+{% endfor %}
+</tbody></table>
+
 <script>
-document.addEventListener("DOMContentLoaded", () => {
-    new Tablesort(document.querySelector("table"));
-});
-
-function filterTable(){
-    const term = document.getElementById("searchInput").value.toLowerCase();
-    document.querySelectorAll("table tbody tr").forEach(row=>{
-        row.style.display = row.innerText.toLowerCase().includes(term) ? "" : "none";
-    });
-}
-</script>
-</body>
-</html>
-
+function fTrend(v){document.querySelectorAll("tbody tr").forEach(r=>{
+  const t=r.querySelector(".metrics span:nth-last-child(3)").textContent;
+  r.style.display=(!v||t.includes(v))?'':'none';
+});}
+function fFlag(v){document.querySelectorAll("tbody tr").forEach(r=>{
+  const fx=r.querySelector(".metrics span:nth-last-child(2)").textContent+
+           r.querySelector(".metrics span:last-child").textContent;
+  r.style.display=(!v||fx.includes(v))?'':'none';
+});}
+</script></body></html>
