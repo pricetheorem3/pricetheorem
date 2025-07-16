@@ -7,35 +7,45 @@
 body{font-family:Inter,sans-serif;margin:2rem;background:#f9f9f9}
 table{width:100%;border-collapse:collapse;background:#fff}
 th,td{border:1px solid #ccc;padding:8px 10px;text-align:center}
+td.signal{font-weight:600}
 .metrics span{display:inline-block;font-size:.8em;padding:0 5px}
 .filter-buttons button{margin-right:6px;margin-bottom:6px}
 @media(max-width:680px){th,td{font-size:.75em}}
 </style></head><body>
 
-<h2>📈 Price Theorem — iGOT Alerts</h2>
+<h2>📈 Price Theorem – iGOT Alerts</h2>
+
+{% if kite_api_key %}
+<div style="margin-bottom:1rem">
+  <a href="https://kite.trade/connect/login?api_key={{ kite_api_key }}"
+     style="background:#1976d2;color:#fff;padding:8px 14px;border-radius:4px;text-decoration:none">
+     🔐 Login to Kite
+  </a>
+  <small>(refresh token daily)</small>
+</div>
+{% endif %}
 
 <form method="get" style="margin-bottom:1rem">
-  <label>📅 Date:</label>
+  <label>📅 Date:</label>
   <input type="date" name="date" value="{{ selected_date }}">
   <button type="submit">View</button>
 </form>
 
 <div class="filter-buttons">
-  <button onclick="fTrend('')">All</button>
-  <button onclick="fTrend('Bullish')">Bullish</button>
-  <button onclick="fTrend('Bearish')">Bearish</button>
-  <button onclick="fFlag('Flat PE')">Flat PE</button>
-  <button onclick="fFlag('Strong CE')">Strong CE</button>
-  <button onclick="fFlag('IV Pump')">IV Pump</button>
-  <button onclick="fFlag('IV Crush')">IV Crush</button>
+  <button onclick="fSignal('')">All</button>
+  <button onclick="fSignal('Bullish')">Bullish</button>
+  <button onclick="fSignal('Bearish')">Bearish</button>
+  <button onclick="fSignal('IV Pump')">IV Pump</button>
+  <button onclick="fSignal('IV Crush')">IV Crush</button>
 </div>
 
 <table><thead><tr>
-  <th>Symbol</th><th>Time</th><th>LTP</th>
+  <th>Signal</th><th>Symbol</th><th>Time</th><th>LTP</th>
   <th>PUT</th><th>CALL</th><th>Metrics</th>
 </tr></thead><tbody>
 {% for a in alerts %}
 <tr>
+  <td class="signal">{{ a.signal if a.signal else a.trend }}</td>
   <td>{{ a.symbol }}</td>
   <td>{{ a.time }}</td>
   <td>{{ a.ltp }}</td>
@@ -48,22 +58,17 @@ th,td{border:1px solid #ccc;padding:8px 10px;text-align:center}
     <span><strong>IVΔC:</strong>{{ a.ivd_ce }}</span>
     <span><strong>IVΔP:</strong>{{ a.ivd_pe }}</span>
     <span><strong>Vol×:</strong>{{ a.call_vol }}</span>
-    <span><strong>T:</strong>{{ a.trend }}</span>
     <span><strong>F:</strong>{{ a.flag }}</span>
-    <span><strong>IV:</strong>{{ a.iv_flag }}</span>
   </td>
-</tr>
-{% endfor %}
+</tr>{% endfor %}
 </tbody></table>
 
 <script>
-function fTrend(v){document.querySelectorAll("tbody tr").forEach(r=>{
-  const t=r.querySelector(".metrics span:nth-last-child(3)").textContent;
-  r.style.display=(!v||t.includes(v))?'':'none';
-});}
-function fFlag(v){document.querySelectorAll("tbody tr").forEach(r=>{
-  const fx=r.querySelector(".metrics span:nth-last-child(2)").textContent+
-           r.querySelector(".metrics span:last-child").textContent;
-  r.style.display=(!v||fx.includes(v))?'':'none';
-});}
-</script></body></html>
+function fSignal(v){
+  document.querySelectorAll("tbody tr").forEach(r=>{
+    const sig=r.querySelector(".signal").textContent;
+    r.style.display=(!v||sig.includes(v))?'':'none';
+  });
+}
+</script>
+</body></html>
