@@ -1,46 +1,137 @@
-/* =================================================================== */
-/*  Price Theorem – base styles (unchanged)                            */
-/* =================================================================== */
-*{box-sizing:border-box;font-family:"Inter","Segoe UI",Arial,Helvetica,sans-serif}
-body{margin:0;padding:0;background:#f4f6fb;color:#222;}
-.container{max-width:1150px;margin:1.2rem auto;padding:0 1rem}
-h1{font-weight:600;font-size:1.4rem;margin:0 0 1rem}
-.login{text-align:right;margin-bottom:1rem}
-.login-btn{background:#0066ff;color:#fff;padding:.45rem 1rem;border-radius:4px;text-decoration:none;font-weight:600}
-.login small{opacity:.7}
-.search-box{margin-bottom:.6rem}
-#searchInput{width:100%;padding:.55rem .7rem;border:1px solid #ccc;border-radius:4px;font-size:.9rem}
-.table-container{overflow-x:auto}
-table{width:100%;border-collapse:collapse;font-size:.85rem;background:#fff;border-radius:6px;overflow:hidden}
-thead{background:#32425c;color:#fff}
-th,td{padding:.55rem .65rem;text-align:left}
-tbody tr:nth-child(even){background:#f1f5ff}
-tbody tr:hover{background:#e3e9ff}
-.put , .call{white-space:nowrap;font-family:monospace}
+/* ========================================================================= */
+/*  Price Theorem — Global Base Styles                                       */
+/* ========================================================================= */
+* {
+    box-sizing: border-box;
+    font-family: "Inter", "Segoe UI", Arial, Helvetica, sans-serif;
+}
 
-/* =================================================================== */
-/*  NEW ADDITIONS – colour cues & compact metrics column               */
-/* =================================================================== */
+body {
+    margin: 0;
+    padding: 0;
+    background: #f4f6fb;
+    color: #222;
+}
 
-/* --- Trend background colours --- */
-.trend.CONFIRMED_UP   { background:#19c37d !important; color:#fff; }
-.trend.CONFIRMED_DOWN { background:#d64545 !important; color:#fff; }
+.container {
+    max-width: 1150px;
+    margin: 1.2rem auto;
+    padding: 0 1rem;
+}
+
+h1 {
+    font-weight: 600;
+    font-size: 1.4rem;
+    margin: 0 0 1rem;
+}
+
+.login {
+    text-align: right;
+    margin-bottom: 1rem;
+}
+
+.login-btn {
+    background: #0066ff;
+    color: #fff;
+    padding: 0.45rem 1rem;
+    border-radius: 4px;
+    text-decoration: none;
+    font-weight: 600;
+}
+
+.login small {
+    opacity: 0.7;
+}
+
+.search-box {
+    margin-bottom: 0.6rem;
+}
+
+#searchInput {
+    width: 100%;
+    padding: 0.55rem 0.7rem;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.9rem;
+}
+
+.table-container {
+    overflow-x: auto;          /* mobile‑friendly horizontal scroll */
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+    background: #fff;
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+thead {
+    background: #32425c;
+    color: #fff;
+}
+
+th,
+td {
+    padding: 0.55rem 0.65rem;
+    text-align: left;
+}
+
+tbody tr:nth-child(even) {
+    background: #f1f5ff;
+}
+
+tbody tr:hover {
+    background: #e3e9ff;
+}
+
+.put,
+.call {
+    white-space: nowrap;
+    font-family: monospace;
+}
+
+/* ========================================================================= */
+/*  NEW ADDITIONS — Trend / Flag colours + compact metrics cell              */
+/* ========================================================================= */
+
+/* --------  Trend backgrounds  -------- */
+.trend.CONFIRMED_UP   { background: #19c37d !important; color: #fff; }
+.trend.CONFIRMED_DOWN { background: #d64545 !important; color: #fff; }
+
 .trend.FAKE_UP,
-.trend.FAKE_DOWN      { background:#ffb066 !important; }
-.trend.UNCONFIRMED    { background:#e0e0e0 !important; }
-.trend.SIDEWAYS       { background:#f5f5f5 !important; }
+.trend.FAKE_DOWN      { background: #ffb066 !important; }
 
-/* --- Flag quick colour --- */
+.trend.UNCONFIRMED    { background: #e0e0e0 !important; }
+.trend.SIDEWAYS       { background: #f5f5f5 !important; }
+
+/* --------  Flag quick‑colours  -------- */
 .flag.IV_PUMP,
 .flag.LOW_VOL,
-.flag.PUT_OI_RISE     { color:#d93737; font-weight:600; }
+.flag.PUT_OI_RISE     { color: #d93737; font-weight: 600; }
 
-/* --- Compact Option‑Metrics cell --- */
-.metrics{line-height:1.15;font-size:.8rem;white-space:nowrap}
-.metrics span{display:inline-block;padding-right:.35rem}
+/* --------  Compact “Option Metrics” cell  -------- */
+.metrics {
+    line-height: 1.15;
+    font-size: 0.80rem;
+    white-space: nowrap;       /* keep inline on wider screens */
+}
 
-/*  Stack metrics vertically on very narrow screens */
-@media (max-width:720px){
-    table thead tr th, table tbody tr td{padding:.4rem .45rem}
-    .metrics span{display:block;padding-right:0}
+.metrics span {
+    display: inline-block;
+    padding-right: 0.35rem;
+}
+
+/* Stack metrics vertically on very narrow devices */
+@media (max-width: 720px) {
+    table thead tr th,
+    table tbody tr td {
+        padding: 0.4rem 0.45rem;
+    }
+    .metrics span {
+        display: block;
+        padding-right: 0;
+    }
 }
