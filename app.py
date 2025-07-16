@@ -1,20 +1,19 @@
-# app.py — iGOT option screener (SQLite + full metrics + IV‑pump logic)
-# ────────────────────────────────────────────────────────────────────
+# app.py — iGOT screener (SQLite + IV‑pump + Signal column)
+# ──────────────────────────────────────────────────────────
 import os, json, math, time, datetime, threading, logging, sqlite3, requests
 from zoneinfo import ZoneInfo
-from flask import Flask, request, render_template, redirect, url_for, session
+from flask import Flask, render_template, request, redirect, url_for, session
 from kiteconnect import KiteConnect
-from db import init_db, DB_FILE               # ← make sure db.py is beside this file
+from db import init_db, DB_FILE
 
-# ─── basic --------------------------------------------------------------------
-IST        = ZoneInfo("Asia/Kolkata")
-IV_FILE    = "iv_915.json"                    # 9 : 15 ATM IV baseline snapshot
-WATCHLIST  = [s.strip().split(":")[-1] for s in os.getenv("WATCHLIST","").split(",") if s.strip()]
-app        = Flask(__name__)
+IST = ZoneInfo("Asia/Kolkata")
+IV_FILE = "iv_915.json"
+WATCHLIST = [s.strip().split(":")[-1] for s in os.getenv("WATCHLIST","").split(",") if s.strip()]
+
+# Flask + env
+app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY","changeme")
-
 KITE_API_KEY    = os.getenv("KITE_API_KEY")
-KITE_API_SECRET = os.getenv("KITE_API_SECRET")
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID= os.getenv("TELEGRAM_CHAT_ID")
 
@@ -22,8 +21,8 @@ init_db()
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-# ─── helpers ------------------------------------------------------------------
-def get_kite() -> KiteConnect:
+# ── helpers ──────────────────────────────────────────────────────────
+def get_kite():
     k = KiteConnect(api_key=KITE_API_KEY)
     if os.path.exists("access_token.txt"):
         k.set_access_token(open("access_token.txt").read().strip())
@@ -39,13 +38,14 @@ def send_telegram(msg:str):
 def save_alert(a:dict):
     with sqlite3.connect(DB_FILE) as c:
         c.execute("""
-        INSERT INTO alerts (symbol,time,move,ltp,dce,dpe,skew,doi_put,
-                            call_vol,trend,flag,ivd_ce,ivd_pe,iv_flag,
-                            call_result,put_result)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        INSERT INTO alerts (
+            symbol,time,move,ltp,dce,dpe,skew,doi_put,call_vol,
+            trend,flag,ivd_ce,ivd_pe,iv_flag,signal,
+            call_result,put_result)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,(a["symbol"],a["time"],a["move"],a["ltp"],a["ΔCE"],a["ΔPE"],
-             a["Skew"],a["ΔOI_PUT"],a["call_vol"],a["trend"],a["flag"],
-             a["IVΔ_CE"],a["IVΔ_PE"],a["iv_flag"],
+             a["Skew"],a["ΔOI_PUT"],a["call_vol"],
+             a["trend"],a["flag"],a["IVΔ_CE"],a["IVΔ_PE"],a["iv_flag"],a["signal"],
              a["call_result"],a["put_result"]))
 
 def load_alerts_for(day:str):
@@ -55,7 +55,7 @@ def load_alerts_for(day:str):
         cols=[d[0] for d in cur.description]
         return [dict(zip(cols,row)) for row in cur.fetchall()]
 
-# ─── BS / IV ------------------------------------------------------------------
+# ── IV solver ────────────────────────────────────────────────────────
 def _bs_price(S,K,T,r,σ,q,cp):
     if σ<=0 or T<=0: return 0
     d1=(math.log(S/K)+(r-q+0.5*σ*σ)*T)/(σ*math.sqrt(T))
@@ -71,7 +71,7 @@ def implied_vol(price,S,K,T,r=0.07,q=0.0,cp=1):
         else: lo=mid
     return round((lo+hi)/2,4)
 
-# ─── 9 : 15 IV baseline -------------------------------------------------------
+# ── 9:15 IV baseline job ─────────────────────────────────────────────
 def capture_iv_snapshot():
     if not WATCHLIST: return
     kite=get_kite(); now=datetime.datetime.now(IST); ivs={}
@@ -89,7 +89,7 @@ def capture_iv_snapshot():
                 ivs[f"{sym}_{t}"]=implied_vol(q["last_price"],spot,K,T,cp=cp)
         except: pass
     json.dump(ivs,open(IV_FILE,"w"))
-    log.info("IV baseline captured for %d symbols",len(ivs))
+    log.info("IV baseline captured: %d symbols",len(ivs))
 
 def schedule_iv_job():
     def worker():
@@ -100,10 +100,9 @@ def schedule_iv_job():
             time.sleep((tgt-now).total_seconds())
             capture_iv_snapshot()
     threading.Thread(target=worker,daemon=True).start()
-
 schedule_iv_job()
 
-# ─── Webhook ------------------------------------------------------------------
+# ── Webhook ──────────────────────────────────────────────────────────
 @app.route("/webhook",methods=["POST"])
 def webhook():
     data=request.get_json(force=True)
@@ -121,7 +120,6 @@ def webhook():
         atm=min(strikes,key=lambda k:abs(k-spot))
         fmt=lambda k,t:f"{sym}{exp[2:4]}{exp[5:7]}{int(k):05d}{t}"
 
-        # Δ premium sums
         dce=dpe=0
         for k in [x for x in strikes if x>=atm][:3]:
             q=kite.quote(fmt(k,"CE"))[fmt(k,"CE")]
@@ -140,7 +138,7 @@ def webhook():
         alert["Skew"]=round(iv_ce-iv_pe,4)
 
         alert["call_vol"]=round(kite.quote(ce_atm)[ce_atm]["volume"]/1000,2)
-        alert["ΔOI_PUT"]=kite.quote(pe_atm)[pe_atm]["oi"]        # simple live value
+        alert["ΔOI_PUT"]=kite.quote(pe_atm)[pe_atm]["oi"]
 
         alert["call_result"]="✅" if kite.quote(ce_atm)[ce_atm]["last_price"]>kite.quote(ce_atm)[ce_atm]["ohlc"]["open"] else "❌"
         alert["put_result"]="✅" if kite.quote(pe_atm)[pe_atm]["last_price"]>kite.quote(pe_atm)[pe_atm]["ohlc"]["open"] else "❌"
@@ -150,33 +148,39 @@ def webhook():
 
         baseline=json.load(open(IV_FILE)) if os.path.exists(IV_FILE) else {}
         iv0_ce=baseline.get(f"{sym}_CE",iv_ce); iv0_pe=baseline.get(f"{sym}_PE",iv_pe)
-        alert["IVΔ_CE"]=round(iv_ce-iv0_ce,4)
-        alert["IVΔ_PE"]=round(iv_pe-iv0_pe,4)
+        alert["IVΔ_CE"]=round(iv_ce-iv0_ce,4); alert["IVΔ_PE"]=round(iv_pe-iv0_pe,4)
+
         thr=0.03
         alert["iv_flag"]="IV Pump" if max(alert["IVΔ_CE"],alert["IVΔ_PE"])>=thr else \
                          "IV Crush" if min(alert["IVΔ_CE"],alert["IVΔ_PE"])<=-thr else ""
 
+        alert["signal"]=f"{alert['trend']} {alert['iv_flag']}".strip()
+
     except Exception as e:
-        log.warning("calc error: %s",e)
+        log.warning("Webhook calc error: %s",e)
         alert["error"]=str(e)
 
     save_alert(alert)
     send_telegram(f"*Alert • {sym}* `{ts}`\nMove: {move}")
     return "OK"
 
-# ─── UI -----------------------------------------------------------------------
+# ── UI routes ────────────────────────────────────────────────────────
 @app.route("/")
 def index():
     if not session.get("logged_in"): return redirect(url_for("login_page"))
     d=request.args.get("date") or datetime.datetime.now(IST).strftime("%Y-%m-%d")
-    return render_template("index.html",alerts=load_alerts_for(d),selected_date=d)
+    return render_template("index.html",
+                           alerts=load_alerts_for(d),
+                           selected_date=d,
+                           kite_api_key=KITE_API_KEY)
 
 @app.route("/login",methods=["GET","POST"])
 def login_page():
     if request.method=="POST":
-        if (request.form.get("username")==os.getenv("APP_USERNAME","admin")
-            and request.form.get("password")==os.getenv("APP_PASSWORD","price123")):
-            session["logged_in"]=True; return redirect(url_for("index"))
+        if (request.form.get("username")==os.getenv("APP_USERNAME","admin") and
+            request.form.get("password")==os.getenv("APP_PASSWORD","price123")):
+            session["logged_in"]=True
+            return redirect(url_for("index"))
     return render_template("login.html")
 
 @app.route("/logout")
