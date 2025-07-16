@@ -5,13 +5,16 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
 <style>
 body{font-family:Inter,sans-serif;margin:2rem;background:#f9f9f9}
+.search{margin-bottom:1rem}
+.search input{padding:6px 10px;width:260px}
 table{width:100%;border-collapse:collapse;background:#fff}
 th,td{border:1px solid #ccc;padding:8px 10px;text-align:center}
 td.signal{font-weight:600}
 .metrics span{display:inline-block;font-size:.8em;padding:0 5px}
 .filter-buttons button{margin-right:6px;margin-bottom:6px}
 @media(max-width:680px){th,td{font-size:.75em}}
-</style></head><body>
+</style>
+</head><body>
 
 <h2>📈 Price Theorem – iGOT Alerts</h2>
 
@@ -25,12 +28,19 @@ td.signal{font-weight:600}
 </div>
 {% endif %}
 
+<!-- date picker -->
 <form method="get" style="margin-bottom:1rem">
   <label>📅 Date:</label>
   <input type="date" name="date" value="{{ selected_date }}">
   <button type="submit">View</button>
 </form>
 
+<!-- search box -->
+<div class="search">
+  <input type="text" id="searchInput" placeholder="🔍 Search symbol / signal…" onkeyup="filterSearch()">
+</div>
+
+<!-- filter buttons -->
 <div class="filter-buttons">
   <button onclick="fSignal('')">All</button>
   <button onclick="fSignal('Bullish')">Bullish</button>
@@ -39,16 +49,16 @@ td.signal{font-weight:600}
   <button onclick="fSignal('IV Crush')">IV Crush</button>
 </div>
 
-<table><thead><tr>
+<table id="alertTable"><thead><tr>
   <th>Signal</th><th>Symbol</th><th>Time</th><th>LTP</th>
-  <th>PUT</th><th>CALL</th><th>Metrics</th>
+  <th>PUT</th><th>CALL</th><th data-sort-method="none">Metrics</th>
 </tr></thead><tbody>
 {% for a in alerts %}
 <tr>
   <td class="signal">{{ a.signal if a.signal else a.trend }}</td>
   <td>{{ a.symbol }}</td>
   <td>{{ a.time }}</td>
-  <td>{{ a.ltp }}</td>
+  <td data-sort="{{ a.ltp }}">{{ a.ltp }}</td>
   <td>{{ a.put_result }}</td>
   <td>{{ a.call_result }}</td>
   <td class="metrics">
@@ -63,11 +73,22 @@ td.signal{font-weight:600}
 </tr>{% endfor %}
 </tbody></table>
 
+<!-- Tablesort & simple JS filters -->
+<script src="https://unpkg.com/tablesort@5.2.1/dist/tablesort.min.js"></script>
 <script>
+document.addEventListener("DOMContentLoaded",()=>new Tablesort(document.getElementById("alertTable")));
+
 function fSignal(v){
-  document.querySelectorAll("tbody tr").forEach(r=>{
+  document.querySelectorAll("#alertTable tbody tr").forEach(r=>{
     const sig=r.querySelector(".signal").textContent;
     r.style.display=(!v||sig.includes(v))?'':'none';
+  });
+}
+
+function filterSearch(){
+  const term=document.getElementById("searchInput").value.toLowerCase();
+  document.querySelectorAll("#alertTable tbody tr").forEach(r=>{
+    r.style.display=r.innerText.toLowerCase().includes(term)?'':'none';
   });
 }
 </script>
