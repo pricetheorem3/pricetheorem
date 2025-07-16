@@ -1,210 +1,201 @@
-# app.py — screener + Trend/Flag + login + daily OI snapshot
-# ───────────────────────────────────────────────────────────
-import os, json, datetime, math, requests, threading, time, functools
-from collections import defaultdict, deque
+# app.py — iGOT screener: SQLite · full options metrics · IV‑pump detection
+# ─────────────────────────────────────────────────────────────────────────
+import os, json, math, time, datetime, threading, logging, sqlite3, requests
+from zoneinfo import ZoneInfo
 from flask import Flask, request, render_template, redirect, url_for, session
 from kiteconnect import KiteConnect
+from db import init_db, DB_FILE               # db.py updated with iv columns
 
-# ─── TZ helpers ────────────────────────────────────────────
-try:
-    from zoneinfo import ZoneInfo
-    IST = ZoneInfo("Asia/Kolkata")
-except ImportError:
-    import pytz
-    IST = pytz.timezone("Asia/Kolkata")
-UTC = datetime.timezone.utc
+IST  = ZoneInfo("Asia/Kolkata")
+IV_FILE = "iv_915.json"                      # 9:15 ATM IV baseline snapshot
+WATCHLIST = [s.strip().split(":")[-1]
+             for s in os.getenv("WATCHLIST","").split(",") if s.strip()]
 
-# ─── Config (env‑vars) ────────────────────────────────────
-WIDTH, GRACE_MINUTES, POLL_STEP = 2, 4, 20
-RF_RATE  = float(os.getenv("RISK_FREE_RATE", 0.07))
-DIV_YIELD= float(os.getenv("DIVIDEND_YIELD", 0.0))
-DATA_DIR = os.getenv("DATA_DIR", ".")
-ALERTS_FILE = os.path.join(DATA_DIR, "alerts.json")
-TOKEN_FILE  = os.path.join(DATA_DIR, "access_token.txt")
-OI915_FILE  = os.path.join(DATA_DIR, "oi_915.json")
-WATCHLIST   = [s.strip().upper() for s in os.getenv("WATCHLIST", "").split(",") if s.strip()]
+app            = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET_KEY","changeme")
 
-CFG = {
-    'CE_big':3.0, 'PE_flat':1.0, 'PE_mult':2.0,
-    'OI_rise':25000, 'skew_sigma':2.0, 'call_vol_req':1.5
-}
+KITE_API_KEY    = os.getenv("KITE_API_KEY")
+KITE_API_SECRET = os.getenv("KITE_API_SECRET")
+TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID= os.getenv("TELEGRAM_CHAT_ID")
 
-# ─── Flask app ────────────────────────────────────────────
-app = Flask(__name__)
-app.secret_key   = os.getenv("FLASK_SECRET_KEY", "changeme")
-KITE_API_KEY     = os.getenv("KITE_API_KEY")
-KITE_API_SECRET  = os.getenv("KITE_API_SECRET")
-TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-    raise RuntimeError("Set TELEGRAM_TOKEN and TELEGRAM_CHAT_ID")
+init_db()
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
 
-# ─── Telegram helper ─────────────────────────────────────
-def send_telegram(txt):
+# ─── Kite helper ───────────────────────────────────────────────────────
+def get_kite() -> KiteConnect:
+    k = KiteConnect(api_key=KITE_API_KEY)
+    if os.path.exists("access_token.txt"):
+        k.set_access_token(open("access_token.txt").read().strip())
+    return k
+
+# ─── Telegram helper ───────────────────────────────────────────────────
+def send_telegram(txt:str):
+    if not (TELEGRAM_TOKEN and TELEGRAM_CHAT_ID): return
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                       data={"chat_id":TELEGRAM_CHAT_ID,"text":txt,"parse_mode":"Markdown"},
                       timeout=5)
-    except Exception as e: print("Telegram:", e)
+    except Exception as e: log.warning("Telegram error: %s",e)
 
-# ─── Kite helpers & instrument cache ─────────────────────
-def get_kite():
-    k=KiteConnect(api_key=KITE_API_KEY)
-    if os.path.exists(TOKEN_FILE):
-        k.set_access_token(open(TOKEN_FILE).read().strip())
-    return k
-INSTRUMENTS, INSTR_DATE=None,None
-def get_instruments():
-    global INSTRUMENTS, INSTR_DATE
-    if INSTRUMENTS is None or INSTR_DATE!=datetime.datetime.now(IST).date():
-        INSTRUMENTS=get_kite().instruments("NFO"); INSTR_DATE=datetime.datetime.now(IST).date()
-    return INSTRUMENTS
-def token_for_symbol(ts): return next((i["instrument_token"] for i in get_instruments()
-                                       if i["tradingsymbol"]==ts), None)
+# ─── SQLite helpers ────────────────────────────────────────────────────
+def save_alert(a:dict):
+    with sqlite3.connect(DB_FILE) as c:
+        c.execute("""
+        INSERT INTO alerts (symbol,time,move,ltp,dce,dpe,skew,doi_put,
+                            call_vol,trend,flag,ivd_ce,ivd_pe,iv_flag,
+                            call_result,put_result)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,(a["symbol"],a["time"],a["move"],a["ltp"],a["ΔCE"],a["ΔPE"],
+             a["Skew"],a["ΔOI_PUT"],a["call_vol"],a["trend"],a["flag"],
+             a["IVΔ_CE"],a["IVΔ_PE"],a["iv_flag"],
+             a["call_result"],a["put_result"]))
 
-# ─── Expiry helpers ──────────────────────────────────────
-def next_expiry(sym):
-    today=datetime.datetime.now(IST).date(); s=sym.upper()
-    dates=sorted({i["expiry"] for i in get_instruments()
-                  if i["instrument_type"] in {"PE","CE"} and
-                     (i["name"]==s or i["tradingsymbol"].startswith(s))})
-    return next((d for d in dates if d>=today), dates[-1])
-def expiry_date(sym): return next_expiry(sym).strftime("%Y-%m-%d")
+def load_alerts_for(day:str):
+    with sqlite3.connect(DB_FILE) as c:
+        cur=c.cursor()
+        cur.execute("SELECT * FROM alerts WHERE time LIKE ? ORDER BY time DESC",(f"{day}%",))
+        cols=[d[0] for d in cur.description]
+        return [dict(zip(cols,row)) for row in cur.fetchall()]
 
-# ─── Option‑chain utilities ──────────────────────────────
-def _matches(sym,exp): s=sym.upper(); return [i for i in get_instruments()
-    if i["instrument_type"] in {"PE","CE"} and i["expiry"]==exp and
-       (i["name"]==s or i["tradingsymbol"].startswith(s))]
-def strikes_from_chain(sym,exp_str,spot):
-    exp=datetime.datetime.strptime(exp_str,"%Y-%m-%d").date()
-    strikes=sorted({i["strike"] for i in _matches(sym,exp)})
-    if not strikes: return []
-    atm=min(strikes,key=lambda k:abs(k-spot)); i=strikes.index(atm)
-    return strikes[max(0,i-WIDTH):i+WIDTH+1]
-def option_symbol(sym,exp_str,strike,kind):
-    exp=datetime.datetime.strptime(exp_str,"%Y-%m-%d").date()
-    for i in get_instruments():
-        if i["instrument_type"]==("CE" if kind=="CALL" else "PE") and i["strike"]==strike and i["expiry"]==exp and \
-            (i["name"]==sym.upper() or i["tradingsymbol"].startswith(sym.upper())):
-            return i["tradingsymbol"]
-    return None
-@functools.lru_cache(maxsize=2048)
-def quote_data(tsym):
-    q=get_kite().quote(tsym)[tsym]
-    return {"ltp":q["last_price"],"open":q["ohlc"]["open"],"oi":q.get("oi",0)}
-
-# five‑minute volume ratio
-def volume_ratio(tsym):
-    tok=token_for_symbol(tsym); kite=get_kite()
-    end=datetime.datetime.now(IST)
-    cds=kite.historical_data(tok, end.replace(hour=9,minute=15,second=0,microsecond=0), end, "5minute")
-    if not cds or len(cds)<4: return 0,0
-    last=cds[-1]["volume"]; avg=sum(c["volume"] for c in cds[-4:-1])/3 or 1
-    return last/avg, last
-
-# volume‑spike tag
-def check_option(tsym,is_put):
-    tok=token_for_symbol(tsym); kite=get_kite()
-    end=datetime.datetime.now(IST)
-    cds=kite.historical_data(tok, end.replace(hour=9,minute=15,second=0,microsecond=0), end,"5minute") or []
-    if not cds: return "❌"
-    latest=cds[-1]
-    if latest["volume"]!=max(c["volume"] for c in cds): return "❌"
-    green=latest["close"]>latest["open"]; red=latest["close"]<latest["open"]
-    return "✅" if ((is_put and green) or (not is_put and red)) else "❌"
-
-# Black‑Scholes solver
+# ─── Black‑Scholes & IV -------------------------------------------------
 def _bs_price(S,K,T,r,σ,q,cp):
     if σ<=0 or T<=0: return 0
-    d1=(math.log(S/K)+(r-q+0.5*σ*σ)*T)/(σ*math.sqrt(T)); d2=d1-σ*math.sqrt(T)
-    Φ=lambda x:.5*(1+math.erf(x/math.sqrt(2)))
-    return cp*math.exp(-q*T)*S*Φ(cp*d1)-cp*math.exp(-r*T)*K*Φ(cp*d2)
-def implied_vol(price,S,K,T,r,q,cp):
-    lo,hi=1e-6,5
-    for _ in range(100):
-        mid=.5*(lo+hi)
-        (hi if _bs_price(S,K,T,r,mid,q,cp)>price else lo).__setattr__('__iadd__',mid-mid)
+    d1=(math.log(S/K)+(r-q+0.5*σ*σ)*T)/(σ*math.sqrt(T))
+    d2=d1-σ*math.sqrt(T)
+    Φ=lambda x:0.5*(1+math.erf(x/math.sqrt(2)))
+    return cp*(S*math.exp(-q*T)*Φ(cp*d1)-K*math.exp(-r*T)*Φ(cp*d2))
 
-# OI baseline snapshot (unchanged)
-def load_oi_baseline():
-    try: return json.load(open(OI915_FILE))
-    except: return {}
-def save_oi_baseline(d): json.dump(d,open(OI915_FILE,"w"))
-def capture_all_oi():
+def implied_vol(price,S,K,T,r=0.07,q=0.0,cp=1):
+    lo,hi=1e-6,5
+    for _ in range(60):
+        mid=(lo+hi)/2
+        if _bs_price(S,K,T,r,mid,q,cp)>price: hi=mid
+        else: lo=mid
+    return round((lo+hi)/2,4)
+
+# ─── 9:15 ATM‑IV snapshot scheduler ------------------------------------
+def capture_iv_snapshot():
     if not WATCHLIST: return
-    kite=get_kite(); baseline={}
-    deadline=datetime.datetime.now(IST).replace(hour=9,minute=15+GRACE_MINUTES,second=0)
-    for sym_full in WATCHLIST:
-        sym=sym_full.split(":")[-1]
-        try: spot=kite.ltp(f"NSE:{sym}")[f"NSE:{sym}"]["last_price"]
-        except: continue
-        exp=expiry_date(sym); strikes=strikes_from_chain(sym,exp,spot)
-        if not strikes: continue
-        atm=min(strikes,key=lambda k:abs(k-spot))
-        for st in strikes[strikes.index(atm)-2: strikes.index(atm)]:
-            tsym=option_symbol(sym,exp,st,"PUT")
-            if tsym and tsym not in baseline:
-                try: oi=kite.quote(tsym)[tsym]["oi"]; baseline[tsym]=oi
-                except: pass
-        if datetime.datetime.now(IST)>deadline: break
-    if baseline: save_oi_baseline(baseline)
-def schedule_snapshot():
+    kite=get_kite(); now=datetime.datetime.now(IST)
+    ivs={}
+    for sym in WATCHLIST:
+        try:
+            inst=[i for i in kite.instruments("NFO") if i["name"]==sym]
+            exp=sorted({i["expiry"] for i in inst})[0].strftime("%Y-%m-%d")
+            spot=kite.ltp(f"NSE:{sym}")[f"NSE:{sym}"]["last_price"]
+            strikes=sorted({i["strike"] for i in inst if i["expiry"].strftime("%Y-%m-%d")==exp})
+            atm=min(strikes,key=lambda k:abs(k-spot))
+            fmt=lambda k,t:f"{sym}{exp[2:4]}{exp[5:7]}{int(k):05d}{t}"
+            for t,cp in (("CE",1),("PE",-1)):
+                ts=fmt(atm,t); q=kite.quote(ts)[ts]
+                K=float(ts[-7:-2]); T=(datetime.datetime.strptime(exp,"%Y-%m-%d")-now.date()).days/365
+                ivs[f"{sym}_{t}"]=implied_vol(q["last_price"],spot,K,T,cp=cp)
+        except: pass
+    json.dump(ivs,open(IV_FILE,"w"))
+    log.info("IV baseline captured for %d symbols",len(ivs))
+
+def schedule_iv_job():
     def worker():
         while True:
             now=datetime.datetime.now(IST)
-            nxt=now.replace(hour=9,minute=15,second=0,microsecond=0)
-            if now>=nxt: nxt+=datetime.timedelta(days=1)
-            time.sleep((nxt-now).total_seconds())
-            capture_all_oi()
+            tgt=now.replace(hour=9,minute=15,second=0,microsecond=0)
+            if now>=tgt: tgt+=datetime.timedelta(days=1)
+            time.sleep((tgt-now).total_seconds())
+            capture_iv_snapshot()
     threading.Thread(target=worker,daemon=True).start()
 
-# rolling skew history
-SKEW_HIST=defaultdict(lambda:deque(maxlen=20))
+schedule_iv_job()
 
-# alert storage
-def today(): return datetime.datetime.now(IST).strftime("%Y-%m-%d")
-def load_alerts_for(d): 
-    try: return [a for a in json.load(open(ALERTS_FILE)) if a["time"].startswith(d)]
-    except: return []
-alerts_today=load_alerts_for(today())
-def save_alert(a):
+# ─── Webhook ───────────────────────────────────────────────────────────
+@app.route("/webhook",methods=["POST"])
+def webhook():
+    data=request.get_json(force=True)
+    if not data or "symbol" not in data: return "Bad payload",400
+    sym=data["symbol"].upper(); move=data.get("move","")
+    now=datetime.datetime.now(IST); ts=now.strftime("%Y-%m-%d %H:%M:%S")
+    kite=get_kite(); spot=kite.ltp(f"NSE:{sym}")[f"NSE:{sym}"]["last_price"]
+
+    alert={"symbol":sym,"time":ts,"move":move,"ltp":spot}
+
     try:
-        data=load_alerts_for("1900-01-01"); 
-        data=[x for x in data if not x["time"].startswith(a["time"][:10])]+[a]
-        json.dump(data,open(ALERTS_FILE,"w"),indent=2)
-    except: pass
-    alerts_today.append(a)
+        inst=[i for i in kite.instruments("NFO") if i["name"]==sym]
+        exp=sorted({i["expiry"] for i in inst})[0].strftime("%Y-%m-%d")
+        strikes=sorted({i["strike"] for i in inst if i["expiry"].strftime("%Y-%m-%d")==exp})
+        atm=min(strikes,key=lambda k:abs(k-spot))
+        ce_strikes=[k for k in strikes if k>=atm][:3]
+        pe_strikes=[k for k in strikes if k<=atm][-3:]
+        fmt=lambda k,t:f"{sym}{exp[2:4]}{exp[5:7]}{int(k):05d}{t}"
 
-# ─── ROUTES ───────────────────────────────────────────────
-@app.route("/login", methods=["GET","POST"])
+        # Δ premium sums
+        dce=dpe=0
+        for k in ce_strikes:
+            q=kite.quote(fmt(k,"CE"))[fmt(k,"CE")]
+            dce+=q["last_price"]-q["ohlc"]["open"]
+        for k in pe_strikes:
+            q=kite.quote(fmt(k,"PE"))[fmt(k,"PE")]
+            dpe+=q["last_price"]-q["ohlc"]["open"]
+        alert["ΔCE"]=round(dce,2); alert["ΔPE"]=round(dpe,2)
+
+        ce_atm=fmt(atm,"CE"); pe_atm=fmt(atm,"PE")
+
+        # IV now & skew
+        def iv_now(ts,cp):
+            q=kite.quote(ts)[ts]; K=float(ts[-7:-2])
+            T=(datetime.datetime.strptime(exp,"%Y-%m-%d")-now.date()).days/365
+            return implied_vol(q["last_price"],spot,K,T,cp=cp)
+        iv_ce=iv_now(ce_atm,1); iv_pe=iv_now(pe_atm,-1)
+        alert["Skew"]=round(iv_ce-iv_pe,4)
+
+        # volume ×1000
+        alert["call_vol"]=round(kite.quote(ce_atm)[ce_atm]["volume"]/1000,2)
+        # ΔOI dummy (no baseline yet)
+        alert["ΔOI_PUT"]=kite.quote(pe_atm)[pe_atm]["oi"]
+
+        # ✅ / ❌ spikes
+        alert["call_result"]="✅" if kite.quote(ce_atm)[ce_atm]["last_price"]>kite.quote(ce_atm)[ce_atm]["ohlc"]["open"] else "❌"
+        alert["put_result"]="✅" if kite.quote(pe_atm)[pe_atm]["last_price"]>kite.quote(pe_atm)[pe_atm]["ohlc"]["open"] else "❌"
+
+        alert["trend"]="Bullish" if dce>abs(dpe) else "Bearish" if dpe>abs(dce) else "Flat"
+        alert["flag"]="Flat PE" if alert["ΔPE"]<0 else ("Strong CE" if alert["ΔCE"]>3 else "")
+
+        # IV pump / crush
+        baseline=json.load(open(IV_FILE)) if os.path.exists(IV_FILE) else {}
+        iv0_ce=baseline.get(f"{sym}_CE",iv_ce)
+        iv0_pe=baseline.get(f"{sym}_PE",iv_pe)
+        alert["IVΔ_CE"]=round(iv_ce-iv0_ce,4)
+        alert["IVΔ_PE"]=round(iv_pe-iv0_pe,4)
+        thr=0.03
+        alert["iv_flag"]="IV Pump" if max(alert["IVΔ_CE"],alert["IVΔ_PE"])>=thr else \
+                         "IV Crush" if min(alert["IVΔ_CE"],alert["IVΔ_PE"])<=-thr else ""
+
+    except Exception as e:
+        log.warning("calc error: %s",e)
+        alert["error"]=str(e)
+
+    save_alert(alert)
+    send_telegram(f"*Alert • {sym}* `{ts}`\nMove: {move}")
+    return "OK"
+
+# ─── UI ---------------------------------------------------------------
+@app.route("/")
+def index():
+    if not session.get("logged_in"): return redirect(url_for("login_page"))
+    d=request.args.get("date") or datetime.datetime.now(IST).strftime("%Y-%m-%d")
+    return render_template("index.html",alerts=load_alerts_for(d),selected_date=d)
+
+@app.route("/login",methods=["GET","POST"])
 def login_page():
     if request.method=="POST":
         if (request.form.get("username")==os.getenv("APP_USERNAME","admin")
             and request.form.get("password")==os.getenv("APP_PASSWORD","price123")):
             session["logged_in"]=True; return redirect(url_for("index"))
-        return render_template("login.html",error="Invalid credentials")
     return render_template("login.html")
+
 @app.route("/logout")
 def logout(): session.clear(); return redirect(url_for("login_page"))
 
-@app.route("/")
-def index():
-    if not session.get("logged_in"):
-        return redirect(url_for("login_page"))
-    d=request.args.get("date",today())
-    return render_template("index.html",alerts=load_alerts_for(d),
-                           selected_date=d,kite_api_key=KITE_API_KEY)
-@app.route("/history/<date_str>")
-def history(date_str):
-    if not session.get("logged_in"):
-        return redirect(url_for("login_page"))
-    return render_template("index.html",alerts=load_alerts_for(date_str),
-                           selected_date=date_str,kite_api_key=KITE_API_KEY)
-
-# ─── Webhook core (unchanged from previous full version) ──────────────────
-#   … KEEP THE SAME BODY FROM THE LAST FILE (omitted here for brevity) …
-
-# ─── Bootstrap ───────────────────────────────────────────
 if __name__=="__main__":
-    schedule_snapshot()
     app.run(debug=True)
+
