@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -11,58 +12,65 @@
     <div class="container">
         <h1>📈 Price Theorem – iGOT Option Volume Results</h1>
 
-        <div class="login">
-            <a href="https://kite.trade/connect/login?api_key={{ kite_api_key }}" class="login-btn">🔐 Login to Kite</a>
-            <p><small>Login daily to generate your access token</small></p>
-        </div>
-
-        <div class="search-box">
-            <input type="text" id="searchInput" placeholder="🔍 Search stock, time, or strike..." onkeyup="filterTable()">
-        </div>
-
-        <div class="table-container">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Stock</th>
-                        <th>Time</th>
-                        <th>Price</th>
-                        <th>% Move</th>
-                        <th>PUT</th>
-                        <th>CALL</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for alert in alerts %}
-                    <tr>
-                        <td>{{ alert.symbol }}</td>
-                        <td>{{ alert.time }}</td>
-                        <td>{{ alert.ltp }}</td>
-                        <td data-sort="{{ alert.pct_move|replace('%','')|float if alert.pct_move }}">{{ alert.pct_move or '' }}</td>
-                        <td class="put" data-sort="{{ alert.put_result.count('✅') }}">{{ alert.put_result }}</td>
-                        <td class="call" data-sort="{{ alert.call_result.count('✅') }}">{{ alert.call_result }}</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
+```
+    <div class="login">
+        <a href="https://kite.trade/connect/login?api_key={{ kite_api_key }}" class="login-btn">🔐 Login to Kite</a>
+        <p><small>Login daily to generate your access token</small></p>
     </div>
 
-    <script src="https://unpkg.com/tablesort@5.2.1/dist/tablesort.min.js"></script>
-    <script>
-        document.addEventListener("DOMContentLoaded", function () {
-            new Tablesort(document.querySelector("table"));
+    <div class="search-box">
+        <input type="text" id="searchInput" placeholder="🔍 Search stock, time, or strike..." onkeyup="filterTable()">
+    </div>
+
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th>Stock</th>
+                    <th>Time</th>
+                    <th>Price</th>
+                    <th>% Move</th>
+                    <th>Δ CE</th>
+                    <th>Δ PE</th>
+                    <th>PUT</th>
+                    <th>CALL</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for alert in alerts %}
+                <tr>
+                    <td>{{ alert.symbol }}</td>
+                    <td>{{ alert.time }}</td>
+                    <td>{{ alert.ltp }}</td>
+                    <td data-sort="{{ alert.move }}">{{ alert.move }}%</td>
+                    <td class="chg {{ 'pos' if alert.ce_chg >= 0 else 'neg' }}" data-sort="{{ alert.ce_chg }}">{{ '%+.2f'|format(alert.ce_chg) }}</td>
+                    <td class="chg {{ 'pos' if alert.pe_chg >= 0 else 'neg' }}" data-sort="{{ alert.pe_chg }}">{{ '%+.2f'|format(alert.pe_chg) }}</td>
+                    <td class="put" data-sort="{{ alert.put_result.count('✅') }}">{{ alert.put_result }}</td>
+                    <td class="call" data-sort="{{ alert.call_result.count('✅') }}">{{ alert.call_result }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script src="https://unpkg.com/tablesort@5.2.1/dist/tablesort.min.js"></script>
+<script>
+    document.addEventListener("DOMContentLoaded", function () {
+        new Tablesort(document.querySelector("table"));
+    });
+
+    function filterTable() {
+        const input = document.getElementById("searchInput").value.toLowerCase();
+        const rows = document.querySelectorAll("table tbody tr");
+
+        rows.forEach(row => {
+            const text = row.innerText.toLowerCase();
+            row.style.display = text.includes(input) ? "" : "none";
         });
+    }
+</script>
+```
 
-        function filterTable() {
-            const input = document.getElementById("searchInput").value.toLowerCase();
-            const rows = document.querySelectorAll("table tbody tr");
-
-            rows.forEach(row => {
-                const text = row.innerText.toLowerCase();
-                row.style.display = text.includes(input) ? "" : "none";
-            });
-        }
-    </script>
 </body>
 </html>
