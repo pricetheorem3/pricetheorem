@@ -8,6 +8,13 @@
 <body>
   <div class="container">
     <h1>📈 Price Theorem – Option Screener</h1>
+
+    {% if not kite_connected %}
+      <p><a href="https://kite.trade/connect/login?api_key={{ kite_api_key }}">🔐 Connect to Kite</a></p>
+    {% else %}
+      <p>✅ Connected to Kite</p>
+    {% endif %}
+
     <p><a href="/logout">Logout</a></p>
     <table>
       <thead>
@@ -34,3 +41,4 @@
   </div>
 </body>
 </html>
+
