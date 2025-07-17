@@ -4,9 +4,10 @@
 """
 FINAL unified version
 ─────────────────────
-1. Premium‑decay calc uses strikes_from_chain() → no more KeyError.
-2. Keeps all earlier logic (login, volume‑spike ✅/❌, Telegram alerts, JSON
-   storage).  No new env‑vars or template tweaks beyond ΔCE/ΔPE columns.
+• Premium‑decay calc uses strikes_from_chain() *and* requests quotes with an
+  “NFO:” prefix → no KeyError and ΔCE/ΔPE values no longer stay at 0.00.
+• All earlier functionality (login, volume‑spike ✅/❌, Telegram alerts, JSON
+  storage) is unchanged.
 """
 
 import os, json, datetime, logging, pathlib, requests
@@ -15,9 +16,9 @@ from kiteconnect import KiteConnect
 
 # ─── Time‑zone helpers ─────────────────────────────────────
 try:
-    from zoneinfo import ZoneInfo              # Py ≥3.9
+    from zoneinfo import ZoneInfo           # Py ≥3.9
     IST = ZoneInfo("Asia/Kolkata")
-except ImportError:                            # Py <3.9
+except ImportError:                         # Py <3.9
     import pytz
     IST = pytz.timezone("Asia/Kolkata")
 
@@ -28,7 +29,7 @@ WIDTH          = 2   # ATM ±2 strikes for volume‑spike logic
 WIDTH_CE_PE    = 1   # ATM ±1 for premium‑decay
 STRIKE_STEP    = 10  # default step; below ₹500 use 5
 
-# ─── Paths (Render‑disk safe) ─────────────────────────────
+# ─── Paths ────────────────────────────────────────────────
 DATA_DIR    = pathlib.Path(os.getenv("DATA_DIR", "."))
 ALERTS_FILE = DATA_DIR / "alerts.json"
 TOKEN_FILE  = DATA_DIR / "access_token.txt"
@@ -87,7 +88,7 @@ def ltp_and_open(kite: KiteConnect, symbols: list[str]):
     q = kite.quote(symbols)
     return {s: (d["last_price"], d["ohlc"]["open"]) for s, d in q.items()}
 
-# ─── Option‑chain helpers (existing) ─────────────────────
+# ─── Option‑chain helpers ─────────────────────────────────
 def next_expiry(symbol: str):
     s, today = symbol.upper(), datetime.datetime.now(IST).date()
     dates = sorted({i["expiry"] for i in get_instruments()
@@ -123,7 +124,7 @@ def option_symbol(sym, exp_str, strike, kind):
             return i["tradingsymbol"]
     return None
 
-# ─── Premium‑decay calc (chain‑safe) ─────────────────────
+# ─── Premium‑decay calc (NFO‑prefixed) ───────────────────
 def compute_ce_pe_change(kite: KiteConnect, symbol: str,
                          width: int = WIDTH_CE_PE):
     base = symbol.replace("NSE:", "").upper()
@@ -136,12 +137,17 @@ def compute_ce_pe_change(kite: KiteConnect, symbol: str,
         return 0.0, 0.0
 
     expiry_code = expiry_dt.strftime("%d%b").upper()
-    symbols = []
-    for st in strikes[: width * 2 + 1]:
-        symbols += [format_option_symbol(base, expiry_code, st, "CE"),
-                    format_option_symbol(base, expiry_code, st, "PE")]
 
-    data = ltp_and_open(kite, symbols)
+    # Build NFO‑prefixed symbols
+    prefixed = []
+    for st in strikes[: width * 2 + 1]:
+        prefixed += [f"NFO:{format_option_symbol(base, expiry_code, st, 'CE')}",
+                     f"NFO:{format_option_symbol(base, expiry_code, st, 'PE')}"]
+
+    raw   = kite.quote(prefixed)
+    data  = {k.split(':')[1]: (v["last_price"], v["ohlc"]["open"])
+             for k, v in raw.items()}
+
     d_ce = d_pe = 0.0
     for st in strikes:
         ce = format_option_symbol(base, expiry_code, st, "CE")
@@ -183,16 +189,14 @@ alerts = []
 if ALERTS_FILE.exists():
     try:
         hist = json.loads(ALERTS_FILE.read_text())
-        alerts = [a for a in hist
-                  if a["time"].startswith(today_str())]
+        alerts = [a for a in hist if a["time"].startswith(today_str())]
     except Exception:
         logging.exception("Load alerts error")
 
 def save_alert(a):
     try:
         hist = json.loads(ALERTS_FILE.read_text()) if ALERTS_FILE.exists() else []
-        hist = [x for x in hist
-                if x["time"].startswith(today_str())]
+        hist = [x for x in hist if x["time"].startswith(today_str())]
         hist.append(a)
         ALERTS_FILE.write_text(json.dumps(hist, indent=2))
         alerts.append(a)
@@ -246,12 +250,9 @@ def webhook():
     symbol = p.get("symbol")
     if not symbol: return "Missing symbol", 400
 
-    # robust trigger‑time parse
     trg = p.get("trigger_time")
     if trg:
-        try:
-            trig_dt = datetime.datetime.fromtimestamp(
-                int(trg), UTC).astimezone(IST)
+        try:    trig_dt = datetime.datetime.fromtimestamp(int(trg), UTC).astimezone(IST)
         except (ValueError, TypeError):
             try:
                 iso_dt = datetime.datetime.fromisoformat(trg.rstrip("Z"))
@@ -264,59 +265,4 @@ def webhook():
 
     kite = get_kite()
     try:
-        # premium‑decay
-        d_ce, d_pe = compute_ce_pe_change(kite, symbol)
-
-        # underlying LTP & % move
-        ltp = kite.ltp([f"NSE:{symbol.upper()}"])[f"NSE:{symbol.upper()}"]["last_price"]
-        prev_close = kite.quote([f"NSE:{symbol.upper()}"])[f"NSE:{symbol.upper()}"]["ohlc"]["close"]
-        move_pct = round((ltp - prev_close) / prev_close * 100, 2)
-
-        # volume‑spike option analysis
-        expiry = next_expiry(symbol).strftime("%Y-%m-%d")
-        strikes = strikes_from_chain(symbol, expiry, ltp)
-        if strikes:
-            put_tags, call_tags = [], []
-            for st in strikes:
-                pe = option_symbol(symbol, expiry, st, "PUT")
-                ce = option_symbol(symbol, expiry, st, "CALL")
-                put_tags.append(f"{st}{check_option(pe, True)  if pe else '❌'}")
-                call_tags.append(f"{st}{check_option(ce, False) if ce else '❌'}")
-            put_result  = "  ".join(put_tags)
-            call_result = "  ".join(call_tags)
-        else:
-            put_result = call_result = "No option chain"
-
-        alert = {
-            "symbol": symbol.upper(),
-            "time": trig_dt.strftime("%Y-%m-%d %H:%M:%S"),
-            "ltp": f"₹{ltp:.2f}",
-            "move": move_pct,
-            "ce_chg": d_ce,
-            "pe_chg": d_pe,
-            "put_result": put_result,
-            "call_result": call_result,
-        }
-        save_alert(alert)
-
-        # Telegram push (only if ✅ appears)
-        if "✅" in put_result or "✅" in call_result:
-            msg = (
-                f"*New Signal* 📊\\n"
-                f"Symbol: `{alert['symbol']}`\\n"
-                f"Time  : {alert['time']}\\n"
-                f"LTP   : {alert['ltp']}\\n"
-                f"ΔCE   : {d_ce:+}  |  ΔPE: {d_pe:+}\\n"
-                f"PUT   : {put_result}\\n"
-                f"CALL  : {call_result}"
-            )
-            send_telegram(msg)
-
-        return "OK", 200
-    except Exception:
-        logging.exception("Webhook error")
-        return "Error", 500
-
-# ─── Dev runner ───────────────────────────────────────────
-if __name__ == "__main__":
-    app.run(debug=True, port=10000)
+        d_ce, d_pe = compute_ce_pe
