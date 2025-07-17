@@ -1,4 +1,6 @@
-<!DOCTYPE html><html lang="en"><head>
+<!DOCTYPE html>
+<html lang="en">
+<head>
 <meta charset="UTF-8">
 <title>Price Theorem Alerts</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -18,13 +20,13 @@ td.signal{font-weight:600}
 
 <h2>📈 Price Theorem – iGOT Alerts</h2>
 
-{% if kite_api_key %}
+{% if kite_login_url %}
 <div style="margin-bottom:1rem">
-  <a href="https://kite.trade/connect/login?api_key={{ kite_api_key }}"
+  <a href="{{ kite_login_url }}"
      style="background:#1976d2;color:#fff;padding:8px 14px;border-radius:4px;text-decoration:none">
-     🔐 Login to Kite
+     🔐 Connect to Kite
   </a>
-  <small>(refresh token daily)</small>
+  <small>(required once per day)</small>
 </div>
 {% endif %}
 
