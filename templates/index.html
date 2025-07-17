@@ -1,44 +1,68 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Price Theorem - Option Screener</title>
-  <link rel="stylesheet" href="/static/style.css">
+    <meta charset="UTF-8">
+    <title>Price Theorem Alerts</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <div class="container">
-    <h1>📈 Price Theorem – Option Screener</h1>
+    <div class="container">
+        <h1>📈 Price Theorem – iGOT Option Volume Results</h1>
 
-    {% if not kite_connected %}
-      <p><a href="https://kite.trade/connect/login?api_key={{ kite_api_key }}">🔐 Connect to Kite</a></p>
-    {% else %}
-      <p>✅ Connected to Kite</p>
-    {% endif %}
+        <div class="login">
+            <a href="https://kite.trade/connect/login?api_key={{ kite_api_key }}" class="login-btn">🔐 Login to Kite</a>
+            <p><small>Login daily to generate your access token</small></p>
+        </div>
 
-    <p><a href="/logout">Logout</a></p>
-    <table>
-      <thead>
-        <tr>
-          <th>Time</th>
-          <th>Symbol</th>
-          <th>LTP</th>
-          <th>PUTs</th>
-          <th>CALLs</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for alert in alerts[::-1] %}
-        <tr>
-          <td>{{ alert.time }}</td>
-          <td>{{ alert.symbol }}</td>
-          <td>{{ alert.ltp }}</td>
-          <td class="put">{{ alert.put_result }}</td>
-          <td class="call">{{ alert.call_result }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
+        <div class="search-box">
+            <input type="text" id="searchInput" placeholder="🔍 Search stock, time, or strike..." onkeyup="filterTable()">
+        </div>
+
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Stock</th>
+                        <th>Time</th>
+                        <th>Price</th>
+                        <th>% Move</th>
+                        <th>PUT</th>
+                        <th>CALL</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for alert in alerts %}
+                    <tr>
+                        <td>{{ alert.symbol }}</td>
+                        <td>{{ alert.time }}</td>
+                        <td>{{ alert.ltp }}</td>
+                        <td data-sort="{{ alert.pct_move|replace('%','')|float if alert.pct_move }}">{{ alert.pct_move or '' }}</td>
+                        <td class="put" data-sort="{{ alert.put_result.count('✅') }}">{{ alert.put_result }}</td>
+                        <td class="call" data-sort="{{ alert.call_result.count('✅') }}">{{ alert.call_result }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/tablesort@5.2.1/dist/tablesort.min.js"></script>
+    <script>
+        document.addEventListener("DOMContentLoaded", function () {
+            new Tablesort(document.querySelector("table"));
+        });
+
+        function filterTable() {
+            const input = document.getElementById("searchInput").value.toLowerCase();
+            const rows = document.querySelectorAll("table tbody tr");
+
+            rows.forEach(row => {
+                const text = row.innerText.toLowerCase();
+                row.style.display = text.includes(input) ? "" : "none";
+            });
+        }
+    </script>
 </body>
 </html>
-
