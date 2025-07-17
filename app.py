@@ -134,7 +134,7 @@ def compute_ce_pe_change(kite: KiteConnect, scrip: str):
     spot = kite.ltp([f"NSE:{base}"])[f"NSE:{base}"]["last_price"]
 
     exp_dt   = next_expiry(base)
-    exp_code = exp_dt.strftime("%d%b").upper()
+    exp_code = exp_dt.strftime("%d%b%y").upper()
     strikes  = strikes_from_chain(base, exp_dt, spot)
     if not strikes:
         return 0.0, 0.0
