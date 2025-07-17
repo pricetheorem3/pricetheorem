@@ -1,57 +1,65 @@
-# app.py – option‑chain screener with CE/PE premium‑change (NFO‑prefixed),
+# app.py – option‑chain screener with CE/PE premium‑change (chain‑safe + NFO),
 #          volume‑spike checks, Telegram alerts
 # ───────────────────────────────────────────────────────────
 """
-Stable build – 17 Jul 2025
-─────────────────────────
-• Premium‑decay uses real strikes (`strikes_from_chain`) and fetches quotes with
-  the `NFO:` prefix so ΔCE / ΔPE populate correctly.
-• Fixed all previous syntax issues; `/webhook` has a complete try/except.
-• All earlier features (login, Telegram, JSON persistence) are preserved.
+FINAL functional build – 17 Jul 2025
+───────────────────────────────────
+• CE/PE premium‑decay:
+  – uses real strikes, adds “NFO:” prefix, returns (0,0) on errors.
+• `ltp_open_map()` batches requests and never raises.
+• All prior routes (login, webhook, Telegram, JSON persistence) intact.
+• Toggle debug logs via LOG_LEVEL=INFO.
 """
 
-import os, json, datetime, logging, pathlib, requests
+import os, json, datetime, logging, pathlib, requests, itertools
 from flask import Flask, request, render_template, redirect, url_for, session
 from kiteconnect import KiteConnect
 
-# ─── Time‑zone helpers ─────────────────────────────────────
+# ─── Logging ──────────────────────────────────────────────
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "WARNING"))
+
+# ─── Time‑zone helpers ───────────────────────────────────
 try:
-    from zoneinfo import ZoneInfo          # Python ≥3.9
+    from zoneinfo import ZoneInfo          # Py ≥3.9
     IST = ZoneInfo("Asia/Kolkata")
-except ImportError:                        # Py <3.9 fallback
-    import pytz
-    IST = pytz.timezone("Asia/Kolkata")
+except ImportError:                        # Py < 3.9
+    import pytz; IST = pytz.timezone("Asia/Kolkata")
 
 UTC = datetime.timezone.utc
 
-# ─── Constants ────────────────────────────────────────────
-WIDTH_VOL    = 2   # ATM ±2 strikes for volume‑spike logic
-WIDTH_DECAY  = 1   # ATM ±1 for premium‑decay
-STRIKE_STEP  = 10  # default; below ₹500 use 5
+# ─── Constants ───────────────────────────────────────────
+WIDTH_VOL    = 2     # ATM ±2 strikes for volume‑spike check
+WIDTH_DECAY  = 1     # ATM ±1 for premium‑decay
+STRIKE_STEP  = 10    # default step; below ₹500 → 5
+QUOTE_BATCH  = 25    # max symbols per kite.quote call
 
-# ─── Paths ────────────────────────────────────────────────
+# ─── Paths ───────────────────────────────────────────────
 DATA_DIR    = pathlib.Path(os.getenv("DATA_DIR", "."))
 ALERTS_FILE = DATA_DIR / "alerts.json"
 TOKEN_FILE  = DATA_DIR / "access_token.txt"
 
-# ─── Flask / env vars ─────────────────────────────────────
+# ─── Flask & env‑vars ────────────────────────────────────
 app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET_KEY", "changeme")
-
-KITE_API_KEY    = os.getenv("KITE_API_KEY")
-KITE_API_SECRET = os.getenv("KITE_API_SECRET")
-TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT   = os.getenv("TELEGRAM_CHAT_ID")
-if not TELEGRAM_TOKEN or not TELEGRAM_CHAT:
-    raise RuntimeError("Please set TELEGRAM_TOKEN and TELEGRAM_CHAT_ID env vars")
+app.secret_key    = os.getenv("FLASK_SECRET_KEY", "changeme")
+KITE_API_KEY      = os.getenv("KITE_API_KEY")
+KITE_API_SECRET   = os.getenv("KITE_API_SECRET")
+TELEGRAM_TOKEN    = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID  = os.getenv("TELEGRAM_CHAT_ID")
+if not (TELEGRAM_TOKEN and TELEGRAM_CHAT_ID):
+    raise RuntimeError("Set TELEGRAM_TOKEN and TELEGRAM_CHAT_ID")
 
 # ─── Telegram helper ─────────────────────────────────────
-def send_telegram(text: str):
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        data={"chat_id": TELEGRAM_CHAT, "text": text, "parse_mode": "Markdown"},
-        timeout=5,
-    )
+def send_telegram(msg: str):
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID,
+                  "text": msg,
+                  "parse_mode": "Markdown"},
+            timeout=5,
+        )
+    except Exception:
+        logging.warning("Telegram send failed")
 
 # ─── Kite session & instrument cache ─────────────────────
 def kite_session() -> KiteConnect:
@@ -60,14 +68,14 @@ def kite_session() -> KiteConnect:
         kite.set_access_token(TOKEN_FILE.read_text().strip())
     return kite
 
-_INSTR, _CACHE_DATE = None, None
+_INSTR_CACHE, _CACHE_DATE = None, None
 def instruments():
-    global _INSTR, _CACHE_DATE
+    global _INSTR_CACHE, _CACHE_DATE
     today = datetime.datetime.now(IST).date()
-    if _INSTR is None or _CACHE_DATE != today:
-        _INSTR = kite_session().instruments("NFO")
-        _CACHE_DATE = today
-    return _INSTR
+    if _INSTR_CACHE is None or _CACHE_DATE != today:
+        _INSTR_CACHE = kite_session().instruments("NFO")
+        _CACHE_DATE  = today
+    return _INSTR_CACHE
 
 # ─── Utility helpers ─────────────────────────────────────
 def price_step(price: float) -> int:
@@ -76,9 +84,24 @@ def price_step(price: float) -> int:
 def opt_symbol(base: str, exp_code: str, strike: int, kind: str) -> str:
     return f"{base}{exp_code}{strike}{kind}"
 
+def chunked(iterable, n):
+    it = iter(iterable)
+    while (batch := list(itertools.islice(it, n))):
+        yield batch
+
 def ltp_open_map(kite: KiteConnect, symbols: list[str]):
-    q = kite.quote(symbols)
-    return {s: (d["last_price"], d["ohlc"]["open"]) for s, d in q.items()}
+    """Return {symbol: (ltp, open)}; never raises."""
+    out = {}
+    if not symbols:
+        return out
+    for batch in chunked(symbols, QUOTE_BATCH):
+        try:
+            q = kite.quote(batch)
+            for s, d in q.items():
+                out[s] = (d["last_price"], d["ohlc"]["open"])
+        except Exception:
+            logging.warning("kite.quote failed for %s", batch)
+    return out
 
 # ─── Option‑chain helpers ─────────────────────────────────
 def next_expiry(scrip: str):
@@ -107,7 +130,7 @@ def nfo_exists(tsym: str) -> bool:
 
 # ─── Premium‑decay calculation ───────────────────────────
 def compute_ce_pe_change(kite: KiteConnect, scrip: str):
-    base = scrip.upper()
+    base = scrip.upper().replace("NSE:", "")
     spot = kite.ltp([f"NSE:{base}"])[f"NSE:{base}"]["last_price"]
 
     exp_dt   = next_expiry(base)
@@ -122,6 +145,8 @@ def compute_ce_pe_change(kite: KiteConnect, scrip: str):
                 if nfo_exists(opt_symbol(base, exp_code, st, kind))]
 
     data_raw = ltp_open_map(kite, prefixed)
+    if not data_raw:
+        return 0.0, 0.0
     data = {k.split(":")[1]: v for k, v in data_raw.items()}
 
     d_ce = d_pe = 0.0
@@ -141,7 +166,7 @@ def check_option(tsym: str, is_put: bool):
     if not token:
         return "❌"
     kite = kite_session()
-    end = datetime.datetime.now(IST)
+    end   = datetime.datetime.now(IST)
     start = datetime.datetime.combine(end.date(), datetime.time(9, 15, tzinfo=IST))
     cds = kite.historical_data(token, start, end, "5minute")
     if not cds:
@@ -221,24 +246,22 @@ def webhook():
 
     kite = kite_session()
     try:
-        # premium‑decay
         d_ce, d_pe = compute_ce_pe_change(kite, symbol)
 
-        # underlying LTP & move
         ltp = kite.ltp([f"NSE:{symbol.upper()}"])[f"NSE:{symbol.upper()}"]["last_price"]
         prev_close = kite.quote([f"NSE:{symbol.upper()}"])[f"NSE:{symbol.upper()}"]["ohlc"]["close"]
         move_pct = round((ltp - prev_close) / prev_close * 100, 2)
 
         exp_dt = next_expiry(symbol)
         strikes = strikes_from_chain(symbol.upper(), exp_dt, ltp)
+        exp_code = exp_dt.strftime("%d%b").upper()
         if strikes:
             puts, calls = [], []
-            exp_str = exp_dt.strftime("%Y-%m-%d")
             for st in strikes:
-                pe = opt_symbol(symbol.upper(), exp_dt.strftime("%d%b").upper(), st, "PE")
-                ce = opt_symbol(symbol.upper(), exp_dt.strftime("%d%b").upper(), st, "CE")
-                puts.append(f"{st}{check_option(pe, True) if pe else '❌'}")
-                calls.append(f"{st}{check_option(ce, False) if ce else '❌'}")
+                pe_ts = opt_symbol(symbol.upper(), exp_code, st, "PE")
+                ce_ts = opt_symbol(symbol.upper(), exp_code, st, "CE")
+                puts.append(f"{st}{check_option(pe_ts, True) if pe_ts else '❌'}")
+                calls.append(f"{st}{check_option(ce_ts, False) if ce_ts else '❌'}")
             put_result  = "  ".join(puts)
             call_result = "  ".join(calls)
         else:
@@ -256,7 +279,6 @@ def webhook():
         }
         save_alert(alert)
 
-        # Telegram push
         if "✅" in put_result or "✅" in call_result:
             send_telegram(
                 f"*New Signal* 📊\n"
