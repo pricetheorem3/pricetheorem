@@ -1,174 +1,138 @@
-# app.py — iGOT screener (SQLite + IV‑pump + Signal column + Kite OAuth)
-# ────────────────────────────────────────────────────────────────────
-# Mandatory ENV: KITE_API_KEY, KITE_API_SECRET, FLASK_SECRET_KEY
-# Optional: WATCHLIST, APP_USERNAME, APP_PASSWORD, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, DATA_DIR, PORT
-# Kite console Redirect‑URL:  https://pricetheorem.com/kite/callback
-
-import os, json, math, time, datetime, threading, logging, sqlite3, requests
-from zoneinfo import ZoneInfo
-from flask import Flask, render_template, request, redirect, url_for, session
+# app.py
+# ─────────────────────────────────────────────────────────────────────────────
+import os, json, datetime
+from flask import Flask, request, render_template, redirect, url_for, session
 from kiteconnect import KiteConnect
-from db import init_db, DB_FILE
 
-IST          = ZoneInfo("Asia/Kolkata")
-DATA_DIR     = os.getenv("DATA_DIR", ".")
-TOKEN_PATH   = os.path.join(DATA_DIR, "access_token.txt")
-IV_FILE      = "iv_915.json"
+# ─── Time-zone helpers ───────────────────────────────────────────────────────
+try:                                    # Python ≥3.9
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except ImportError:                     # fallback for older versions
+    import pytz
+    IST = pytz.timezone("Asia/Kolkata")
 
+UTC = datetime.timezone.utc
+
+# ─── Flask app ──────────────────────────────────────────────────────────────
+app = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "changeme")
+
+# ─── Env / file paths ───────────────────────────────────────────────────────
 KITE_API_KEY    = os.getenv("KITE_API_KEY")
 KITE_API_SECRET = os.getenv("KITE_API_SECRET")
-TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID= os.getenv("TELEGRAM_CHAT_ID")
+TOKEN_FILE      = "access_token.txt"
+ALERTS_FILE     = "alerts.json"
 
-APP_USER     = os.getenv("APP_USERNAME", "admin")
-APP_PASS     = os.getenv("APP_PASSWORD", "price123")
-FLASK_SECRET = os.getenv("FLASK_SECRET_KEY", "changeme")
-
-WATCHLIST = [s.strip().split(":")[-1] for s in os.getenv("WATCHLIST", "").split(",") if s.strip()]
-
-app = Flask(__name__)
-app.secret_key = FLASK_SECRET
-init_db()
-logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
-log = logging.getLogger("iGOT")
-
-# Helpers
-
-def _token_available():
-    return os.path.exists(TOKEN_PATH) and os.path.getsize(TOKEN_PATH) > 0
-
-def _read_token():
-    return open(TOKEN_PATH).read().strip() if _token_available() else ""
-
-def _write_token(tok):
-    os.makedirs(os.path.dirname(TOKEN_PATH), exist_ok=True)
-    with open(TOKEN_PATH, "w") as f:
-        f.write(tok)
-
+# ─── Helpers ────────────────────────────────────────────────────────────────
 def get_kite():
     kite = KiteConnect(api_key=KITE_API_KEY)
-    if _token_available():
-        kite.set_access_token(_read_token())
+    if os.path.exists(TOKEN_FILE):
+        with open(TOKEN_FILE) as f:
+            kite.set_access_token(f.read().strip())
     return kite
 
-def send_telegram(msg):
-    if not (TELEGRAM_TOKEN and TELEGRAM_CHAT_ID): return
+def today_str():
+    """Return YYYY-MM-DD string in IST (not server’s UTC)."""
+    return datetime.datetime.now(IST).strftime("%Y-%m-%d")
+
+# Load only today’s alerts into memory
+alerts = []
+if os.path.exists(ALERTS_FILE):
     try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", data={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
+        with open(ALERTS_FILE) as f:
+            all_alerts = json.load(f)
+            alerts = [a for a in all_alerts if a["time"].startswith(today_str())]
     except Exception as e:
-        log.warning("Telegram error: %s", e)
+        print("Failed to load alerts:", e)
 
-def save_alert(a):
-    with sqlite3.connect(DB_FILE) as c:
-        c.execute("""
-            INSERT INTO alerts (symbol,time,move,ltp,dce,dpe,skew,doi_put,call_vol,trend,flag,ivd_ce,ivd_pe,iv_flag,signal,call_result,put_result)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (
-            a["symbol"], a["time"], a["move"], a["ltp"],
-            a.get("ΔCE"), a.get("ΔPE"), a.get("Skew"), a.get("ΔOI_PUT"), a.get("call_vol"),
-            a.get("trend"), a.get("flag"), a.get("IVΔ_CE"), a.get("IVΔ_PE"), a.get("iv_flag"),
-            a.get("signal"), a.get("call_result"), a.get("put_result")
-        ))
+def save_alert(alert):
+    """Persist alert to file and keep in-memory list in sync (today only)."""
+    try:
+        all_alerts = []
+        if os.path.exists(ALERTS_FILE):
+            with open(ALERTS_FILE) as f:
+                all_alerts = json.load(f)
+        all_alerts = [a for a in all_alerts if a["time"].startswith(today_str())]
+        all_alerts.append(alert)
+        with open(ALERTS_FILE, "w") as f:
+            json.dump(all_alerts, f, indent=2)
+        alerts.append(alert)
+    except Exception as e:
+        print("Error saving alert:", e)
 
-def load_alerts_for(day):
-    with sqlite3.connect(DB_FILE) as c:
-        cur = c.cursor()
-        cur.execute("SELECT * FROM alerts WHERE time LIKE ? ORDER BY time DESC", (f"{day}%",))
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+# ─── Option helpers ────────────────────────────────────────────────────────
+def expiry_date(symbol):
+    """Indices → nearest Thursday; stocks → last Thursday of month."""
+    today = datetime.datetime.now(IST).date()
+    if symbol.upper() in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]:
+        days = 3 - today.weekday()           # Monday=0
+        if days < 0: days += 7
+        exp = today + datetime.timedelta(days=days)
+    else:
+        next_month = today.replace(day=28) + datetime.timedelta(days=4)
+        exp = next_month - datetime.timedelta(days=next_month.weekday() + 2)
+    return exp.strftime("%Y-%m-%d")
 
-# IV logic
+def step(symbol):
+    if "BANKNIFTY" in symbol.upper(): return 100
+    if "NIFTY"     in symbol.upper(): return 50
+    return 10
 
-def _bs_price(S, K, T, r, σ, q, cp):
-    if σ <= 0 or T <= 0: return 0.0
-    d1 = (math.log(S / K) + (r - q + 0.5 * σ * σ) * T) / (σ * math.sqrt(T))
-    d2 = d1 - σ * math.sqrt(T)
-    Φ = lambda x: 0.5 * (1 + math.erf(x / math.sqrt(2)))
-    return cp * (S * math.exp(-q * T) * Φ(cp * d1) - K * math.exp(-r * T) * Φ(cp * d2))
+def strike_range(spot, step_size):
+    atm = round(spot / step_size) * step_size
+    return [atm + step_size * i for i in range(-2, 3)]    # ATM ±2 strikes
 
-def implied_vol(price, S, K, T, r=0.07, q=0.0, cp=1):
-    lo, hi = 1e-6, 5
-    for _ in range(60):
-        mid = (lo + hi) / 2
-        if _bs_price(S, K, T, r, mid, q, cp) > price:
-            hi = mid
-        else:
-            lo = mid
-    return round((lo + hi) / 2, 4)
-
-# IV snapshot capture
-
-def capture_iv_snapshot():
-    if not WATCHLIST or not _token_available(): return
+def find_option(symbol, expiry, strike, opt_type):
     kite = get_kite()
-    now = datetime.datetime.now(IST)
-    ivs = {}
-    for sym in WATCHLIST:
-        try:
-            inst = [i for i in kite.instruments("NFO") if i["name"] == sym]
-            if not inst: continue
-            exp = sorted({i["expiry"] for i in inst})[0].strftime("%Y-%m-%d")
-            spot = kite.ltp(f"NSE:{sym}")[f"NSE:{sym}"]["last_price"]
-            strikes = sorted({i["strike"] for i in inst if i["expiry"].strftime("%Y-%m-%d") == exp})
-            atm = min(strikes, key=lambda k: abs(k - spot))
-            for t, cp in (("CE", 1), ("PE", -1)):
-                ts = next(i["tradingsymbol"] for i in inst if i["strike"] == atm and i["instrument_type"] == t)
-                q = kite.quote(ts)[ts]
-                K = atm
-                T = (datetime.datetime.strptime(exp, "%Y-%m-%d").date() - now.date()).days / 365
-                ivs[f"{sym}_{t}"] = implied_vol(q["last_price"], spot, K, T, cp=cp)
-        except Exception as e:
-            log.debug("IV snapshot error for %s – %s", sym, e)
-    json.dump(ivs, open(IV_FILE, "w"))
-    log.info("IV baseline captured: %d symbols", len(ivs))
+    for inst in kite.instruments("NFO"):
+        if (inst["tradingsymbol"].startswith(symbol.upper())
+            and inst["instrument_type"] == ("CE" if opt_type == "CALL" else "PE")
+            and inst["strike"] == strike
+            and inst["expiry"].strftime("%Y-%m-%d") == expiry):
+            return inst["tradingsymbol"]
+    return None
 
-def schedule_iv_job():
-    def worker():
-        while True:
-            now = datetime.datetime.now(IST)
-            tgt = now.replace(hour=9, minute=15, second=0, microsecond=0)
-            if now >= tgt: tgt += datetime.timedelta(days=1)
-            time.sleep((tgt - now).total_seconds())
-            capture_iv_snapshot()
-    threading.Thread(target=worker, daemon=True).start()
-schedule_iv_job()
-
-@app.route("/kite/auth")
-def kite_auth():
-    return redirect(KiteConnect(api_key=KITE_API_KEY).login_url())
-
-@app.route("/kite/callback")
-def kite_callback():
-    if request.args.get("status") != "success": return "Kite login failed", 400
-    req_token = request.args.get("request_token") or ""
-    kite = KiteConnect(api_key=KITE_API_KEY)
+def check_option(opt_symbol, is_put):
+    """
+    ✅ = latest 5-min candle is highest-volume of the day AND
+         colour rule: green for PUT, red for CALL
+    ❌ otherwise (or no candles).
+    """
+    kite = get_kite()
     try:
-        data = kite.generate_session(req_token, api_secret=KITE_API_SECRET)
+        end   = datetime.datetime.now(IST)
+        start = datetime.datetime.combine(end.date(), datetime.time(9, 15, tzinfo=IST))
+        candles = kite.historical_data(opt_symbol, start, end, "5minute")
+        if not candles:
+            print(f"No 5-min candles for {opt_symbol}; skipping.")
+            return "❌"
+        volumes = [c["volume"] for c in candles]
+        latest  = candles[-1]
+        if latest["volume"] != max(volumes):
+            return "❌"
+        is_green = latest["close"] > latest["open"]
+        is_red   = latest["close"] < latest["open"]
+        return "✅" if ((is_put and is_green) or (not is_put and is_red)) else "❌"
     except Exception as e:
-        log.error("generate_session failed: %s", e)
-        return f"Kite session error: {e}", 400
-    _write_token(data["access_token"])
-    log.info("Kite access_token stored")
-    session["kite_connected"] = True
-    return redirect(url_for("index"))
+        print(f"check_option error for {opt_symbol}:", e)
+        return "❌"
 
-# Webhook route with updated formatting logic — see previous message
-# Full logic inserted into canvas already
-
+# ─── Routes ────────────────────────────────────────────────────────────────
 @app.route("/")
 def index():
     if not session.get("logged_in"):
         return redirect(url_for("login_page"))
-    kite_login_url = url_for("kite_auth") if not _token_available() else None
-    d = request.args.get("date") or datetime.datetime.now(IST).strftime("%Y-%m-%d")
-    return render_template("index.html", alerts=load_alerts_for(d), selected_date=d, kite_login_url=kite_login_url)
+    return render_template("index.html", alerts=alerts, kite_api_key=KITE_API_KEY)
 
 @app.route("/login", methods=["GET", "POST"])
 def login_page():
     if request.method == "POST":
-        if request.form.get("username") == APP_USER and request.form.get("password") == APP_PASS:
+        if (request.form.get("username") == os.getenv("APP_USERNAME", "admin") and
+            request.form.get("password") == os.getenv("APP_PASSWORD", "price123")):
             session["logged_in"] = True
             return redirect(url_for("index"))
+        return render_template("login.html", error="Invalid credentials")
     return render_template("login.html")
 
 @app.route("/logout")
@@ -176,5 +140,71 @@ def logout():
     session.clear()
     return redirect(url_for("login_page"))
 
+@app.route("/login/callback")
+def login_callback():
+    rt = request.args.get("request_token")
+    if not rt:
+        return "No request_token", 400
+    try:
+        kite = KiteConnect(api_key=KITE_API_KEY)
+        data = kite.generate_session(rt, api_secret=KITE_API_SECRET)
+        with open(TOKEN_FILE, "w") as f:
+            f.write(data["access_token"])
+        print("Access token generated and saved.")
+        return redirect(url_for("index"))
+    except Exception as e:
+        print("login_callback error:", e)
+        return "Token generation failed", 500
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    payload = request.json or {}
+    symbol  = payload.get("symbol")
+    if not symbol:
+        return "Missing symbol", 400
+
+    # ── Use TradingView’s trigger_time or fallback to now(IST) ───────────
+    trig_epoch = payload.get("trigger_time")      # string of epoch-seconds
+    if trig_epoch:
+        try:
+            trig_dt_utc = datetime.datetime.fromtimestamp(int(trig_epoch), UTC)
+            trig_dt     = trig_dt_utc.astimezone(IST)
+        except Exception:
+            trig_dt = datetime.datetime.now(IST)
+    else:
+        trig_dt = datetime.datetime.now(IST)
+
+    kite = get_kite()
+    try:
+        quote      = kite.ltp(f"NSE:{symbol.upper()}")[f"NSE:{symbol.upper()}"]
+        spot_price = quote["last_price"]
+
+        expiry  = expiry_date(symbol)
+        step_sz = step(symbol)
+        strikes = strike_range(spot_price, step_sz)
+
+        put_res, call_res = [], []
+        for st in strikes:
+            pe = find_option(symbol, expiry, st, "PUT")
+            ce = find_option(symbol, expiry, st, "CALL")
+            put_res.append(check_option(f"NFO:{pe}",  True)  if pe else "❌")
+            call_res.append(check_option(f"NFO:{ce}", False) if ce else "❌")
+
+        alert = {
+            "symbol"     : symbol.upper(),
+            "time"       : trig_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "ltp"        : f"₹{spot_price:.2f}",
+            "pct_move"   : "",             # optional: add %-move if you want
+            "put_result" : " ".join(put_res),
+            "call_result": " ".join(call_res),
+        }
+        save_alert(alert)
+        print("Processed alert:", alert)
+        return "OK", 200
+    except Exception as e:
+        print("Webhook error:", e)
+        return "Error", 500
+
+# ─── Local dev runner ────────────────────────────────────────────────────
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)), debug=True)
+    app.run(debug=True)
