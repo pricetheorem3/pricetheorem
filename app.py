@@ -1,15 +1,14 @@
 # app.py — iGOT screener (SQLite + IV‑pump + Signal column + Kite OAuth)
 # ────────────────────────────────────────────────────────────────────
-# Required ENV variables on Render / .env:
-# KITE_API_KEY, KITE_API_SECRET, FLASK_SECRET_KEY
+# Mandatory ENV: KITE_API_KEY, KITE_API_SECRET, FLASK_SECRET_KEY
 # Optional: WATCHLIST, APP_USERNAME, APP_PASSWORD, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, DATA_DIR, PORT
-# Redirect‑URL in Kite console → https://pricetheorem.com/kite/callback
+# Kite console Redirect‑URL:  https://pricetheorem.com/kite/callback
 
 import os, json, math, time, datetime, threading, logging, sqlite3, requests
 from zoneinfo import ZoneInfo
 from flask import Flask, render_template, request, redirect, url_for, session
 from kiteconnect import KiteConnect
-from db import init_db, DB_FILE          # your existing helper
+from db import init_db, DB_FILE
 
 # ─── Config ─────────────────────────────────────────────────────────
 IST          = ZoneInfo("Asia/Kolkata")
@@ -37,7 +36,7 @@ logging.basicConfig(level=logging.INFO,
                     format="%(levelname)s:%(name)s:%(message)s")
 log = logging.getLogger("iGOT")
 
-# ─── Helpers: token / Telegram / DB ─────────────────────────────────
+# ─── Helpers ────────────────────────────────────────────────────────
 def _token_available() -> bool:
     return os.path.exists(TOKEN_PATH) and os.path.getsize(TOKEN_PATH) > 0
 
@@ -69,7 +68,6 @@ def send_telegram(msg: str):
         log.warning("Telegram error: %s", e)
 
 def save_alert(a: dict):
-    # insert with .get() so missing fields don’t crash
     with sqlite3.connect(DB_FILE) as c:
         c.execute(
             """
@@ -116,7 +114,7 @@ def implied_vol(price, S, K, T, r=0.07, q=0.0, cp=1):
             lo = mid
     return round((lo + hi) / 2, 4)
 
-# ─── 9:15 IV snapshot scheduler ────────────────────────────────────
+# ─── IV snapshot scheduler ─────────────────────────────────────────
 def capture_iv_snapshot():
     if not WATCHLIST or not _token_available(): return
     kite = get_kite(); now = datetime.datetime.now(IST); ivs = {}
@@ -153,7 +151,7 @@ def schedule_iv_job():
     threading.Thread(target=worker, daemon=True).start()
 schedule_iv_job()
 
-# ─── Kite OAuth routes ─────────────────────────────────────────────
+# ─── Kite OAuth ────────────────────────────────────────────────────
 @app.route("/kite/auth")
 def kite_auth():
     return redirect(KiteConnect(api_key=KITE_API_KEY).login_url())
@@ -162,8 +160,7 @@ def kite_auth():
 def kite_callback():
     if request.args.get("status") != "success":
         return "Kite login failed", 400
-    req_token = request.args.get("request_token")
-    if not req_token: return "Missing request_token", 400
+    req_token = request.args.get("request_token") or ""
     kite = KiteConnect(api_key=KITE_API_KEY)
     try:
         data = kite.generate_session(req_token, api_secret=KITE_API_SECRET)
@@ -175,16 +172,14 @@ def kite_callback():
     session["kite_connected"] = True
     return redirect(url_for("index"))
 
-# ─── Webhook from TradingView ─────────────────────────────────────
+# ─── Webhook from TradingView ──────────────────────────────────────
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    if not _token_available():
-        return "Kite not connected", 503
+    if not _token_available(): return "Kite not connected", 503
     data = request.get_json(force=True)
-    if not data or "symbol" not in data:
-        return "Bad payload", 400
+    if not data or "symbol" not in data: return "Bad payload", 400
 
-    sym  = data["symbol"].upper()
+    sym = data["symbol"].upper()
     move = data.get("move", "")
     now  = datetime.datetime.now(IST)
     ts   = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -192,7 +187,6 @@ def webhook():
     kite = get_kite()
     spot = kite.ltp(f"NSE:{sym}")[f"NSE:{sym}"]["last_price"]
 
-    # pre‑fill all keys so we never KeyError in save_alert
     alert = {"symbol": sym, "time": ts, "move": move, "ltp": spot}
     alert |= {k: None for k in (
         "ΔCE","ΔPE","Skew","ΔOI_PUT","call_vol",
@@ -265,7 +259,7 @@ def webhook():
     send_telegram(f"*Alert • {sym}* `{ts}`\nMove: {move}")
     return "OK"
 
-# ─── Dashboard / Auth routes ───────────────────────────────────────
+# ─── Dashboard / Auth ──────────────────────────────────────────────
 @app.route("/")
 def index():
     if not session.get("logged_in"):
